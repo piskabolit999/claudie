@@ -1,6 +1,6 @@
-# Klodik: a pixel desk buddy for Claude Code
+# Claudie: your mini assistant
 
-Klodik is a small pixel-art crab that sits on your desktop, above every window,
+Claudie is a small pixel-art crab that sits on your desktop, above every window,
 and reacts to what Claude Code is doing. He flinches when you grab him, puts on
 headphones when you plug them in, dances to music, and changes outfit with the
 season: spring sprout and tea, sakura with bows, Neon Miami, Halloween and more.
