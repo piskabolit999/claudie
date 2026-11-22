@@ -1,0 +1,7 @@
+keys.json
+config.json
+state.json*
+sessions/
+*.log
+*.tmp
+__pycache__/
