@@ -119,4 +119,44 @@ app.root.destroy()
 after_cfg = open(REAL_CONFIG, encoding="utf-8").read() if os.path.exists(REAL_CONFIG) else None
 assert after_cfg == before_cfg, "the test changed the user's config.json"
 
+# Window closing, browser detection and search verification
+import pc_actions  # noqa: E402
+import freeai  # noqa: E402
+
+b = pc_actions.get_default_browser()
+assert b.get("name") and b.get("exe"), f"Default browser detection failed: {b}"
+
+# Local intent tests: default browser query, close tab, close window, web search, app close
+handled, rep = pc_actions.handle_local_intent("який браузер по дефолту")
+assert handled and b["name"] in rep, rep
+
+handled, rep = pc_actions.handle_local_intent("закрий вкладку")
+assert handled and "Вкладку закрито" in rep, rep
+
+handled, rep = pc_actions.handle_local_intent("закрий це вікно")
+assert handled and "Закрив" in rep, rep
+
+handled, rep = pc_actions.handle_local_intent("закрий чат")
+assert handled and "<!--ACTION:chat:close-->" in rep, rep
+
+handled, rep = pc_actions.handle_local_intent("закрий телеграм")
+assert handled and "Telegram" in rep, rep
+
+handled, rep = pc_actions.handle_local_intent("загугли новини")
+assert handled and "новини" in rep, rep
+
+handled, rep = pc_actions.handle_local_intent("нова вкладка")
+assert handled and "Нову вкладку відкрито" in rep, rep
+
+handled, rep = pc_actions.handle_local_intent("відкрий браузер")
+assert handled and b["name"] in rep, rep
+
+# Persona rules verification
+assert "friendly" in freeai.PERSONA.lower(), "Persona must be friendly/calm"
+assert "cynical" not in freeai.PERSONA.lower(), "Persona must not be cynical"
+assert "brutally honest" not in freeai.PERSONA.lower(), "Persona must not be brutally honest"
+assert "never lie" in freeai.PERSONA.lower(), "Truth rule missing"
+assert "по факту" in freeai.PERSONA.lower(), "Factual rule missing"
+assert "без сюсюкання" in freeai.PERSONA.lower(), "No baby talk rule missing"
+
 print("ok")

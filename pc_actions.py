@@ -4,13 +4,16 @@ Handles desktop actions: creating folders, opening apps, opening folders/URLs,
 and controlling media on Windows with full Program Files search and fuzzy typo matching.
 """
 import ctypes
+from ctypes import wintypes
 import difflib
 import os
 import re
 import shutil
 import subprocess
 import time
+import urllib.parse
 import webbrowser
+import winreg
 
 # Special Windows folder paths
 DESKTOP = os.path.join(os.path.expanduser("~"), "Desktop")
@@ -202,6 +205,12 @@ def resolve_app_target(query: str) -> tuple[str | None, str, bool]:
     if not q:
         return None, "", False
 
+    # Check default browser if requested
+    if q in ("браузер", "browser", "веб-браузер", "веб браузер"):
+        b_info = get_default_browser()
+        if b_info.get("exe"):
+            return b_info["exe"], b_info["name"], False
+
     # 1. Check Known Apps exact match
     if q in KNOWN_APPS:
         item = KNOWN_APPS[q]
@@ -359,7 +368,334 @@ def create_user_folder(name: str = "", location: str = "", cwd: str | None = Non
     return full_path, loc_label, folder_name
 
 
-def handle_local_intent(text: str, cwd: str | None = None) -> tuple[bool, str | None]:
+# Windows Default Browser and Window Management helpers
+_DEFAULT_BROWSER_CACHE: dict[str, str] = {}
+_DEFAULT_BROWSER_TIME: float = 0.0
+
+
+def get_default_browser() -> dict[str, str]:
+    """Auto-detect Windows default browser from Registry (HKCU UserChoice).
+    Returns dict: {'name': str, 'exe': str, 'prog_id': str, 'cmd': str}."""
+    global _DEFAULT_BROWSER_CACHE, _DEFAULT_BROWSER_TIME
+    now = time.time()
+    if _DEFAULT_BROWSER_CACHE and (now - _DEFAULT_BROWSER_TIME < 60):
+        return _DEFAULT_BROWSER_CACHE
+
+    prog_id = None
+    for sub in (
+        r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice",
+        r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice",
+    ):
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, sub) as key:
+                prog_id, _ = winreg.QueryValueEx(key, "ProgId")
+                if prog_id:
+                    break
+        except Exception:
+            pass
+
+    cmd = ""
+    exe = ""
+    if prog_id:
+        roots = [winreg.HKEY_CLASSES_ROOT, winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE]
+        for r in roots:
+            for p in (rf"{prog_id}\shell\open\command", rf"Software\Classes\{prog_id}\shell\open\command"):
+                try:
+                    with winreg.OpenKey(r, p) as key:
+                        cmd, _ = winreg.QueryValueEx(key, "")
+                        if cmd:
+                            break
+                except Exception:
+                    pass
+            if cmd:
+                break
+
+    if cmd:
+        m = re.search(r'"([^"]+\.exe)"', cmd, re.IGNORECASE) or re.search(r'([^\s"]+\.exe)', cmd, re.IGNORECASE)
+        if m:
+            exe = m.group(1)
+
+    if not exe or not os.path.exists(exe):
+        candidates = [
+            os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles%\Mozilla Firefox\firefox.exe"),
+            shutil.which("msedge.exe"),
+            shutil.which("chrome.exe"),
+            shutil.which("firefox.exe"),
+        ]
+        for c in candidates:
+            if c and os.path.exists(c):
+                exe = c
+                break
+
+    name = "Браузер"
+    low = ((prog_id or "") + " " + (exe or "")).lower()
+    if "edge" in low or "msedge" in low:
+        name = "Microsoft Edge"
+    elif "chrome" in low:
+        name = "Google Chrome"
+    elif "firefox" in low:
+        name = "Mozilla Firefox"
+    elif "opera" in low:
+        name = "Opera"
+    elif "brave" in low:
+        name = "Brave"
+    elif "vivaldi" in low:
+        name = "Vivaldi"
+    elif exe:
+        name = os.path.splitext(os.path.basename(exe))[0].capitalize()
+
+    res = {"name": name, "exe": exe or "", "prog_id": prog_id or "", "cmd": cmd or ""}
+    _DEFAULT_BROWSER_CACHE = res
+    _DEFAULT_BROWSER_TIME = now
+    return res
+
+
+def open_in_browser(target: str = "") -> bool:
+    """Open a URL, search query, or empty browser in the user's default browser."""
+    target = (target or "").strip()
+    b_info = get_default_browser()
+    exe = b_info.get("exe")
+
+    if not target:
+        if exe and os.path.exists(exe):
+            try:
+                subprocess.Popen([exe])
+                return True
+            except Exception:
+                pass
+        webbrowser.open("about:blank")
+        return True
+
+    if not (target.startswith("http://") or target.startswith("https://")):
+        if re.match(r"^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:/.*)?$", target):
+            url = "https://" + target
+        else:
+            url = f"https://www.google.com/search?q={urllib.parse.quote_plus(target)}"
+    else:
+        url = target
+
+    if exe and os.path.exists(exe):
+        try:
+            subprocess.Popen([exe, url])
+            return True
+        except Exception:
+            pass
+
+    try:
+        webbrowser.open(url)
+        return True
+    except Exception:
+        return False
+
+
+def open_web_search(query: str) -> bool:
+    """Search Google in the default browser."""
+    q = (query or "").strip()
+    if not q:
+        return open_in_browser("")
+    url = f"https://www.google.com/search?q={urllib.parse.quote_plus(q)}"
+    return open_in_browser(url)
+
+
+def new_browser_tab() -> tuple[bool, str]:
+    """Open a new tab in browser (Ctrl + T) or launch default browser."""
+    try:
+        u = ctypes.windll.user32
+        u.keybd_event(0x11, 0, 0, 0)
+        u.keybd_event(0x54, 0, 0, 0)
+        u.keybd_event(0x54, 0, 2, 0)
+        u.keybd_event(0x11, 0, 2, 0)
+        return True, "Нову вкладку відкрито. 🌐"
+    except Exception:
+        open_in_browser("")
+        return True, "Браузер відкрито. 🌐"
+
+
+def close_tab() -> tuple[bool, str]:
+    """Close the current tab (Ctrl + W)."""
+    try:
+        u = ctypes.windll.user32
+        u.keybd_event(0x11, 0, 0, 0)
+        u.keybd_event(0x57, 0, 0, 0)
+        u.keybd_event(0x57, 0, 2, 0)
+        u.keybd_event(0x11, 0, 2, 0)
+        return True, "Вкладку закрито. ✖️"
+    except Exception as e:
+        return False, f"Помилка закриття вкладки: {e}"
+
+
+def close_active_window(active_title: str = "", active_pname: str = "") -> tuple[bool, str]:
+    """Close the currently active user window gracefully."""
+    u = ctypes.windll.user32
+    my_pid = os.getpid()
+
+    def get_title(h):
+        length = u.GetWindowTextLengthW(h)
+        if not length:
+            return ""
+        buf = ctypes.create_unicode_buffer(length + 1)
+        u.GetWindowTextW(h, buf, length + 1)
+        return buf.value.strip()
+
+    def get_pid(h):
+        p = ctypes.c_ulong()
+        u.GetWindowThreadProcessId(h, ctypes.byref(p))
+        return p.value
+
+    target_hwnd = 0
+    target_title = active_title.strip() if active_title else ""
+
+    fg = u.GetForegroundWindow()
+    if fg and u.IsWindow(fg) and u.IsWindowVisible(fg) and get_pid(fg) != my_pid:
+        target_hwnd = fg
+        if not target_title:
+            target_title = get_title(fg)
+
+    if not target_hwnd:
+        curr = fg or u.GetTopWindow(0)
+        count = 0
+        while curr and count < 100:
+            count += 1
+            if u.IsWindowVisible(curr) and not u.IsIconic(curr):
+                p = get_pid(curr)
+                if p != my_pid and p != 0:
+                    t = get_title(curr)
+                    if t and t not in ("Program Manager", "Settings", "Windows Shell Experience Host"):
+                        target_hwnd = curr
+                        if not target_title:
+                            target_title = t
+                        break
+            curr = u.GetWindow(curr, 2)  # GW_HWNDNEXT = 2
+
+    if target_hwnd:
+        u.PostMessageW(target_hwnd, 0x0010, 0, 0)  # WM_CLOSE
+        label = f" «{target_title}»" if target_title else " активне вікно"
+        return True, f"Закрив{label}. ✖️"
+
+    # Fallback Alt+F4
+    try:
+        u.keybd_event(0x12, 0, 0, 0)  # VK_MENU (Alt)
+        u.keybd_event(0x73, 0, 0, 0)  # VK_F4
+        u.keybd_event(0x73, 0, 2, 0)
+        u.keybd_event(0x12, 0, 2, 0)
+        return True, "Закрив активне вікно. ✖️"
+    except Exception:
+        pass
+
+    if active_pname and not any(k in active_pname.lower() for k in ("python", "explorer", "claud")):
+        try:
+            subprocess.run(f'taskkill /IM "{active_pname}"', shell=True, capture_output=True)
+            return True, f"Закрив вікно {active_pname}. ✖️"
+        except Exception:
+            pass
+
+    return False, "Не вдалося визначити активне вікно для закриття. 🤔"
+
+
+def _close_process_gracefully(exe_name: str, title_pattern: str = "") -> bool:
+    """Send WM_CLOSE to matching windows and graceful taskkill signal."""
+    success = False
+    u = ctypes.windll.user32
+    k = ctypes.windll.kernel32
+    my_pid = os.getpid()
+
+    try:
+        def enum_cb(hwnd, lparam):
+            nonlocal success
+            if not u.IsWindowVisible(hwnd):
+                return True
+            pid = ctypes.c_ulong()
+            u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == my_pid or pid.value == 0:
+                return True
+            length = u.GetWindowTextLengthW(hwnd)
+            title = ""
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                u.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value.strip()
+
+            pname = ""
+            hproc = k.OpenProcess(0x1000, False, pid.value)
+            if hproc:
+                pbuf = ctypes.create_unicode_buffer(512)
+                sz = ctypes.c_ulong(512)
+                k.QueryFullProcessImageNameW(hproc, 0, pbuf, ctypes.byref(sz))
+                k.CloseHandle(hproc)
+                pname = os.path.basename(pbuf.value).lower()
+
+            matched = False
+            if exe_name and pname == exe_name.lower():
+                matched = True
+            elif title_pattern and title and (title_pattern.lower() in title.lower()):
+                matched = True
+
+            if matched:
+                u.PostMessageW(hwnd, 0x0010, 0, 0)
+                success = True
+            return True
+
+        WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        u.EnumWindows(WNDENUMPROC(enum_cb), 0)
+    except Exception:
+        pass
+
+    if exe_name:
+        try:
+            res = subprocess.run(f'taskkill /IM "{exe_name}"', shell=True, capture_output=True, text=True)
+            if res.returncode == 0:
+                success = True
+        except Exception:
+            pass
+
+    return success
+
+
+def close_app_by_name(query: str) -> tuple[bool, str]:
+    """Close a specific application by name, window title, or process."""
+    q = query.strip().lower()
+    q = re.sub(r"^(?:програму|додаток|приложение|app|прогу|вікно|процес)\s+", "", q).strip(' \t\r\n:"\'')
+    if not q:
+        return False, "Вкажи назву програми, яку закрити."
+
+    if q in ("браузер", "browser", "веб-браузер", "веб браузер"):
+        b_info = get_default_browser()
+        exe = os.path.basename(b_info.get("exe", "msedge.exe"))
+        name = b_info.get("name", "Браузер")
+        _close_process_gracefully(exe)
+        return True, f"Закрив «{name}». ✖️"
+
+    target, display_name, _ = resolve_app_target(q)
+    exe_name = ""
+    if target:
+        if target.endswith(".exe"):
+            exe_name = os.path.basename(target)
+        elif target.endswith(".lnk"):
+            exe_name = os.path.basename(target)[:-4] + ".exe"
+
+    if not display_name:
+        display_name = q.capitalize()
+
+    if not exe_name:
+        for k, item in KNOWN_APPS.items():
+            if q == k or q in k:
+                exe_name = item.get("exe") or ""
+                display_name = item.get("name", display_name)
+                break
+
+    if not exe_name:
+        candidate = q if q.endswith(".exe") else f"{q}.exe"
+        exe_name = candidate
+
+    _close_process_gracefully(exe_name, title_pattern=q)
+    return True, f"Закрив «{display_name}». ✖️"
+
+
+def handle_local_intent(
+    text: str, cwd: str | None = None, active_title: str = "", active_pname: str = ""
+) -> tuple[bool, str | None]:
     """Check if user query is a direct PC command.
     Returns (handled: bool, mascot_reply: str | None)."""
     t = text.strip()
@@ -422,14 +758,68 @@ def handle_local_intent(text: str, cwd: str | None = None) -> tuple[bool, str | 
             pass
         return True, "Папку проекту відкрито. 📁"
 
-    # 3. OPEN WEBSITES
+    # 3. DEFAULT BROWSER QUERY
+    if any(k in low for k in ("браузер по дефолту", "браузер за замовчуванням", "браузер по замовчуванню", "браузер по умолчанию", "дефолтний браузер", "дефолтный браузер")) or (
+        re.search(r"(?:який|какой|що|what).*(?:браузер|browser)", low) and not any(k in low for k in ("відкрий", "запусти", "закрий", "скачай"))
+    ):
+        b_info = get_default_browser()
+        return True, f"Твій браузер за замовчуванням — {b_info['name']}. 🌐"
+
+    # 4. WINDOW & TAB CLOSING
+    if re.search(r"^(?:закрий|закрити|close)\s+(?:цю\s+)?(?:вкладку|таб|tab)$", low):
+        _, reply = close_tab()
+        return True, reply
+
+    if re.search(r"^(?:закрий|закрити|close)\s+(?:це\s+|поточне\s+|активне\s+)?вікно$", low) or re.search(r"^(?:закрий|закрити|close)\s+це$", low):
+        _, reply = close_active_window(active_title=active_title, active_pname=active_pname)
+        return True, reply
+
+    if re.search(r"^(?:закрий|закрити|close|сховай)\s+(?:чат|діалог|вікно чату)$", low) or low in ("закрийся", "сховайся", "закрий чат"):
+        return True, "Ховаю чат. 👋<!--ACTION:chat:close-->"
+
+    close_app_m = re.search(r"^(?:закрий|закрити|close|вигрузи|закрий програму|закрий процес)\s+(.+)", low)
+    if close_app_m:
+        app_target = close_app_m.group(1).strip()
+        if app_target not in ("вкладку", "таб", "tab", "вікно", "це вікно", "активне вікно", "поточне вікно", "чат"):
+            _, reply = close_app_by_name(app_target)
+            return True, reply
+
+    # 5. BROWSER NAVIGATION & WEB SEARCH
+    if re.search(r"^(?:нова вкладка|відкрий нову вкладку|новий таб|new tab)$", low):
+        _, reply = new_browser_tab()
+        return True, reply
+
+    search_m = re.search(r"^(?:загугли|гугли|пошукай в інтернеті|пошукай в гуглі|знайди в інтернеті|знайди в гуглі|search|пошукай)\s+(.+)", low)
+    if search_m:
+        query = search_m.group(1).strip()
+        open_web_search(query)
+        return True, f"Шукаю в браузері: «{query}». 🌐"
+
+    if low.startswith("знайди "):
+        rest = t[7:].strip()
+        if rest and not any(rest.lower().startswith(k) for k in ("папку", "файл", "програму", "додаток")):
+            open_web_search(rest)
+            return True, f"Шукаю в браузері: «{rest}». 🌐"
+
+    if re.search(r"^(?:відкрий|відкрити|запусти|open)\s+(?:браузер|browser)$", low):
+        b_info = get_default_browser()
+        open_in_browser("")
+        return True, f"Відкрив браузер {b_info['name']}. 🌐"
+
+    url_m = re.search(r"^(?:відкрий|відкрити|open)\s+(https?://\S+|www\.\S+|\S+\.(?:com|org|net|io|ua|tv|gov|edu|dev)\S*)$", low)
+    if url_m:
+        u_target = url_m.group(1).strip()
+        open_in_browser(u_target)
+        return True, "Відкрив посилання в браузері. 🌐"
+
+    # 6. OPEN WEBSITES
     for kw, url in KNOWN_URLS.items():
         if re.search(rf"(?:відкрий|открой|open)\s+{kw}\b", low):
-            webbrowser.open(url)
+            open_in_browser(url)
             name_cap = kw.capitalize()
             return True, f"{name_cap} відкрито. 🚀"
 
-    # 4. OPEN / LAUNCH APPS (with Program Files scanning & fuzzy matching)
+    # 7. OPEN / LAUNCH APPS (with Program Files scanning & fuzzy matching)
     open_app_m = re.search(r"^(?:відкрий|відкрити|открой|открыть|open|запусти|запустити|запустить|launch|start)\s+(.+)", low)
     if open_app_m:
         app_query = open_app_m.group(1).strip()
@@ -504,11 +894,36 @@ def execute_action_tag(tag: str, cwd: str | None = None) -> bool:
             os.startfile(folder)
             return True
 
+        if tag == "close_window":
+            close_active_window()
+            return True
+
+        if tag == "close_tab":
+            close_tab()
+            return True
+
+        if tag.startswith("close_app:"):
+            app_name = tag[10:].strip()
+            close_app_by_name(app_name)
+            return True
+
+        if tag == "new_tab":
+            new_browser_tab()
+            return True
+
+        if tag.startswith("browser_search:"):
+            query = tag[15:].strip()
+            open_web_search(query)
+            return True
+
+        if tag.startswith("browser_open:"):
+            url = tag[13:].strip()
+            open_in_browser(url)
+            return True
+
         if tag.startswith("url:"):
             url = tag[4:].strip()
-            if not url.startswith(("http://", "https://")):
-                url = "https://" + url
-            webbrowser.open(url)
+            open_in_browser(url)
             return True
 
         if tag.startswith("app:"):

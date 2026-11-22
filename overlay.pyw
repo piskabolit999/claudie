@@ -643,6 +643,8 @@ class Claudik:
                 self.reset_pos()
             elif tag == "mascot:snooze":
                 self.snooze()
+            elif tag in ("chat:close", "close_chat"):
+                self.close_chat()
             else:
                 pc_actions.execute_action_tag(tag, cwd=self.cwd)
         except Exception as e:
@@ -914,8 +916,14 @@ class Claudik:
 
         # Tier 1: Check direct local intent first (instant, 100% reliable)
         try:
-            handled, local_reply = pc_actions.handle_local_intent(q, cwd=self.cwd)
+            handled, local_reply = pc_actions.handle_local_intent(
+                q, cwd=self.cwd, active_title=self.active_win_title, active_pname=self.active_pname
+            )
             if handled and local_reply:
+                m = re.search(r"<!--ACTION:(.*?)-->", local_reply)
+                if m:
+                    action_found = m.group(1).strip()
+                    local_reply = re.sub(r"<!--ACTION:.*?-->", "", local_reply).strip()
                 out = local_reply
         except Exception as e:
             log(f"local_intent error: {e!r}")
