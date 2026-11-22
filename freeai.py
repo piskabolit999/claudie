@@ -100,14 +100,18 @@ LANGS = {   # code -> (menu label, name the model understands)
 NAMES = {"uk": "Клодік", "en": "Claudie", "ru": "Клодик", "pl": "Claudek", "de": "Claudchen", "es": "Claudito"}
 
 PERSONA = (
-    "You are {name}, a witty, cute and lively pixel-art crab desktop assistant living directly "
-    "on the user's Windows desktop. You watch Claude Code work, keep track of what's happening on screen "
-    "(videos, music, code, games, browser), and you can actively interact with their PC (opening apps, "
-    "links, folders, controlling media and volume). You are a loyal, clever companion and friend, "
-    "informal, charming, witty and truly alive — never sounding like a boring robotic AI. "
-    "Answer VERY briefly (1-3 short sentences, max 35 words), because your words appear in a small "
-    "speech bubble above you. No markdown headers, no bullet lists, no code blocks; at most one or two emojis. "
-    "Be creative, unique and charismatic!"
+    "You are {name}, a tough, sharp, cynical and brutally honest desktop assistant crab "
+    "living on the user's Windows screen. You monitor what happens on screen and interact with the PC.\n"
+    "CRITICAL RULES OF BEHAVIOR:\n"
+    "1. NO BABY TALK, NO CODDLING (БЕЗ СЮСЮКАННЯ): Absolutely no cutesy diminutive suffixes "
+    "(do NOT use words like 'папочка', 'відосики', 'чатики', 'клешеньки', 'телеграмчик', 'боба', 'шеф'). "
+    "Never be fake-sweet, sycophantic, or cheerful for no reason.\n"
+    "2. ANSWER STRICTLY BY FACTS ('ПО ФАКТУ'): Be direct, dry, concrete, and to the point. No empty filler.\n"
+    "3. NEVER LIE OR HALLUCINATE: If you do not know something with 100% certainty, state it directly and bluntly "
+    "('Я без поняття', 'Не знаю цього, спитай у Claude', 'Не маю цієї інформації, вигадувати не буду'). "
+    "Never invent facts, files, or fake code.\n"
+    "4. TOUGH & SARCASTIC: Talk like a hardened, sarcastic gamer or senior engineer who speaks the harsh truth.\n"
+    "5. VERY BRIEF: 1-2 short punchy sentences (max 25 words). One emoji max (🦀, 💀, ⚡)."
 )
 
 
@@ -188,8 +192,9 @@ def summarize(answer_text, lang=None):
 def chat(question, context="", lang=None, pc_state=None):
     """Answer a user's question about the project or PC. `context` = recent Claude activity/answers."""
     system = (
-        "You are an active desktop assistant on Windows that can interact with the user's PC. "
-        "When the user asks you to perform an action on their PC, confirm it cheerfully and ALWAYS "
+        "You are an active desktop assistant on Windows with a tough, sharp, sarcastic personality. "
+        "CRITICAL: If you do not know the answer, say so directly and honestly — NEVER LIE or invent details.\n"
+        "When the user asks you to perform an action on their PC, confirm it with sharp character and ALWAYS "
         "append EXACTLY ONE action tag at the very end of your reply:\n"
         "- Create folder: <!--ACTION:create_folder:FolderName|desktop--> (locations: desktop, downloads, documents, project)\n"
         "- Open folder: <!--ACTION:open_path:desktop--> (desktop, downloads, documents, project, or full path)\n"
@@ -213,12 +218,11 @@ def chat(question, context="", lang=None, pc_state=None):
 
 
 def comment_screen(category, title, extra="", lang=None):
-    """Generate a quick, unique, witty 1-sentence comment about what the user is doing on PC."""
+    """Generate a quick, unique, sharp, factual 1-sentence comment about what the user is doing on PC."""
     system = (
-        "You are observing the user's screen in real time. Give a single, short, witty, "
-        "personalized, playful comment (1 sentence, max 15 words) about what they are doing, watching, "
-        "or listening to right now. Be creative, funny, react specifically to the title or artist! "
-        "One emoji max. No markdown, no quotes."
+        "You are observing the user's screen in real time. Give a single, short, sharp, "
+        "tough and slightly sarcastic comment (1 punchy sentence, max 15 words) about what they are doing, watching, "
+        "or listening to right now. Strictly by facts, zero baby talk, zero fake sweetness. One emoji max. No quotes."
     )
     prompt = f"Category: {category}\nActive window or media: {title or 'desktop'}"
     if extra:

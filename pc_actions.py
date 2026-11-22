@@ -390,7 +390,7 @@ def handle_local_intent(text: str, cwd: str | None = None) -> tuple[bool, str | 
         # Extract clean folder name
         name = re.sub(r"^(?:під назвою|з назвою|с именем|named|called|ім'я|имя|\"|\')+", "", rest, flags=re.IGNORECASE).strip(' \t\r\n:"\'')
         path, loc_label, final_name = create_user_folder(name=name, location=loc, cwd=cwd)
-        return True, f"Створив папку «{final_name}» на {loc_label}! 📁✨"
+        return True, f"Папку «{final_name}» створено на {loc_label}. 📁"
 
     # 2. OPEN SPECIAL FOLDERS
     if re.search(r"(?:відкрий|открой|open)\s+(?:папку\s+)?(?:робоч(?:ий|ого)\s+стіл|рабочий\s+стол|desktop|десктоп)", low):
@@ -398,21 +398,21 @@ def handle_local_intent(text: str, cwd: str | None = None) -> tuple[bool, str | 
             os.startfile(DESKTOP)
         except Exception:
             pass
-        return True, "Відкрив робочий стіл! 🖥️"
+        return True, "Робочий стіл відкрито. 🖥️"
 
     if re.search(r"(?:відкрий|открой|open)\s+(?:папку\s+)?(?:завантаженн(?:я|ь)|downloads|загрузк(?:и|ек))", low):
         try:
             os.startfile(DOWNLOADS)
         except Exception:
             pass
-        return True, "Відкрив папку Завантаження! 📂"
+        return True, "Папку Завантаження відкрито. 📂"
 
     if re.search(r"(?:відкрий|открой|open)\s+(?:папку\s+)?(?:документ(?:и|ів)|documents)", low):
         try:
             os.startfile(DOCUMENTS)
         except Exception:
             pass
-        return True, "Відкрив Документи! 📄"
+        return True, "Папку Документи відкрито. 📄"
 
     if re.search(r"(?:відкрий|открой|open)\s+(?:папку\s+)?(?:проект(?:у|а)?|проєкт(?:у|а)?|project|файли)", low):
         folder = cwd if (cwd and os.path.exists(cwd)) else DESKTOP
@@ -420,14 +420,14 @@ def handle_local_intent(text: str, cwd: str | None = None) -> tuple[bool, str | 
             os.startfile(folder)
         except Exception:
             pass
-        return True, "Ось файли проекту! 📁"
+        return True, "Папку проекту відкрито. 📁"
 
     # 3. OPEN WEBSITES
     for kw, url in KNOWN_URLS.items():
         if re.search(rf"(?:відкрий|открой|open)\s+{kw}\b", low):
             webbrowser.open(url)
             name_cap = kw.capitalize()
-            return True, f"Відкриваю {name_cap}! 🚀"
+            return True, f"{name_cap} відкрито. 🚀"
 
     # 4. OPEN / LAUNCH APPS (with Program Files scanning & fuzzy matching)
     open_app_m = re.search(r"^(?:відкрий|відкрити|открой|открыть|open|запусти|запустити|запустить|launch|start)\s+(.+)", low)
@@ -438,35 +438,35 @@ def handle_local_intent(text: str, cwd: str | None = None) -> tuple[bool, str | 
             launched = launch_target(target, display_name)
             if launched:
                 if is_fuzzy:
-                    return True, f"Схоже, ти мав на увазі «{display_name}» — відкриваю! 🚀"
-                return True, f"Запускаю {display_name}! ⚡"
+                    return True, f"Малося на увазі «{display_name}» — запущено. 🚀"
+                return True, f"Запущено {display_name}. ⚡"
         else:
-            return True, f"Не знайшов програму «{app_query}» у папках з програмами. Перевір назву чи шлях! 🤔"
+            return True, f"Програму «{app_query}» не знайдено серед встановлених. 🤔"
 
     # 5. MEDIA CONTROLS
     if re.search(r"^(?:пауза|постав на паузу|стоп музика|пауза музика|pause)$", low) or "постав музику на паузу" in low:
         send_media_key(0xB3)  # VK_MEDIA_PLAY_PAUSE
-        return True, "Поставив на паузу! ⏸️"
+        return True, "Відтворення призупинено. ⏸️"
 
     if re.search(r"^(?:плей|продовж|продовжити|play|resume)$", low) or "увімкни музику" in low or "включи музику" in low:
         send_media_key(0xB3)  # VK_MEDIA_PLAY_PAUSE
-        return True, "Грає далі! 🎵"
+        return True, "Відтворення відновлено. 🎵"
 
     if "голосніше" in low or "добав звук" in low or "додай звук" in low or "volume up" in low:
         send_media_key(0xAF, 4)  # VK_VOLUME_UP
-        return True, "Зробив голосніше! 🔊"
+        return True, "Гучність збільшено. 🔊"
 
     if "тихіше" in low or "зменш звук" in low or "убав звук" in low or "volume down" in low:
         send_media_key(0xAE, 4)  # VK_VOLUME_DOWN
-        return True, "Зробив тихіше! 🔉"
+        return True, "Гучність зменшено. 🔉"
 
     if "вимкни звук" in low or "без звуку" in low or "мут" in low or "mute" in low:
         send_media_key(0xAD)  # VK_VOLUME_MUTE
-        return True, "Вимкнув звук! 🔇"
+        return True, "Звук вимкнено. 🔇"
 
     if "наступний трек" in low or "наступна пісня" in low or "next track" in low or "переключи" in low:
         send_media_key(0xB0)  # VK_MEDIA_NEXT_TRACK
-        return True, "Перемкнув на наступний трек! ⏭️"
+        return True, "Перемкнуто на наступний трек. ⏭️"
 
     return False, None
 
