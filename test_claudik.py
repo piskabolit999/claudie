@@ -151,6 +151,30 @@ assert handled and "Нову вкладку відкрито" in rep, rep
 handled, rep = pc_actions.handle_local_intent("відкрий браузер")
 assert handled and b["name"] in rep, rep
 
+# Multi-language translation tests
+assert pc_actions.tr("tab_closed", "en") == "Tab closed. ✖️"
+assert pc_actions.tr("tab_closed", "uk") == "Вкладку закрито. ✖️"
+assert pc_actions.tr("tab_closed", "de") == "Tab geschlossen. ✖️"
+assert pc_actions.tr("tab_closed", "pl") == "Karta zamknięta. ✖️"
+assert pc_actions.tr("active_window_closed", "es") == "Ventana activa cerrada. ✖️"
+
+# LibreWolf support verification
+lw_path = pc_actions.find_librewolf()
+assert lw_path and os.path.exists(lw_path), f"LibreWolf not found: {lw_path}"
+
+handled, rep = pc_actions.handle_local_intent("використовуй librewolf для ссилок", lang="uk")
+assert handled and "LibreWolf" in rep, rep
+assert pc_actions._USE_LIBREWOLF_FOR_LINKS is True
+
+handled, rep = pc_actions.handle_local_intent("use librewolf for links", lang="en")
+assert handled and "LibreWolf" in rep, rep
+
+handled, rep = pc_actions.handle_local_intent("закрий вкладку", lang="en")
+assert handled and "Tab closed" in rep, rep
+
+handled, rep = pc_actions.handle_local_intent("закрий вкладку", lang="de")
+assert handled and "Tab geschlossen" in rep, rep
+
 # Persona rules verification
 assert "friendly" in freeai.PERSONA.lower(), "Persona must be friendly/calm"
 assert "cynical" not in freeai.PERSONA.lower(), "Persona must not be cynical"

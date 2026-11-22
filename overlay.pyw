@@ -646,7 +646,10 @@ class Claudik:
             elif tag in ("chat:close", "close_chat"):
                 self.close_chat()
             else:
-                pc_actions.execute_action_tag(tag, cwd=self.cwd)
+                res = pc_actions.execute_action_tag(tag, cwd=self.cwd, lang=self.lang())
+                if isinstance(res, str) and res.strip():
+                    self.chat_msgs.append({"who": "bot", "text": res, "born": self.frame, "lang": self.lang()})
+                    self.say(shorten(res, 200), 30, "answer")
         except Exception as e:
             log(f"execute_pc_action error: {e!r}")
 
@@ -917,7 +920,7 @@ class Claudik:
         # Tier 1: Check direct local intent first (instant, 100% reliable)
         try:
             handled, local_reply = pc_actions.handle_local_intent(
-                q, cwd=self.cwd, active_title=self.active_win_title, active_pname=self.active_pname
+                q, cwd=self.cwd, active_title=self.active_win_title, active_pname=self.active_pname, lang=lang
             )
             if handled and local_reply:
                 m = re.search(r"<!--ACTION:(.*?)-->", local_reply)

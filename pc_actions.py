@@ -3,15 +3,20 @@
 Handles desktop actions: creating folders, opening apps, opening folders/URLs,
 and controlling media on Windows with full Program Files search and fuzzy typo matching.
 """
+import base64
 import ctypes
 from ctypes import wintypes
 import difflib
+import io
+import json
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.parse
+import urllib.request
 import webbrowser
 import winreg
 
@@ -83,6 +88,11 @@ KNOWN_APPS = {
     "едж": {"name": "Microsoft Edge", "exe": "msedge.exe"},
     "opera": {"name": "Opera", "exe": "opera.exe"},
     "опера": {"name": "Opera", "exe": "opera.exe"},
+    "librewolf": {"name": "LibreWolf", "exe": "librewolf.exe"},
+    "лібревулф": {"name": "LibreWolf", "exe": "librewolf.exe"},
+    "лібревольф": {"name": "LibreWolf", "exe": "librewolf.exe"},
+    "либревулф": {"name": "LibreWolf", "exe": "librewolf.exe"},
+    "либревольф": {"name": "LibreWolf", "exe": "librewolf.exe"},
     "браузер": {"name": "Браузер", "exe": "msedge.exe", "fallback": "chrome.exe"},
     "browser": {"name": "Браузер", "exe": "msedge.exe", "fallback": "chrome.exe"},
     "canva": {"name": "Canva", "exe": "Canva.exe"},
@@ -368,6 +378,467 @@ def create_user_folder(name: str = "", location: str = "", cwd: str | None = Non
     return full_path, loc_label, folder_name
 
 
+LOCALIZED_STRINGS: dict[str, dict[str, str]] = {
+    "folder_created": {
+        "uk": "Папку «{name}» створено на {loc}. 📁",
+        "en": "Folder '{name}' created on {loc}. 📁",
+        "ru": "Папка «{name}» создана в {loc}. 📁",
+        "pl": "Folder «{name}» został utworzony w {loc}. 📁",
+        "de": "Ordner '{name}' wurde erstellt in {loc}. 📁",
+        "es": "Carpeta '{name}' creada en {loc}. 📁",
+    },
+    "loc_desktop": {
+        "uk": "робочому столі", "en": "Desktop", "ru": "рабочем столе",
+        "pl": "Pulpicie", "de": "Desktop", "es": "Escritorio",
+    },
+    "loc_downloads": {
+        "uk": "Завантаженнях", "en": "Downloads", "ru": "Загрузках",
+        "pl": "Pobranych", "de": "Downloads", "es": "Descargas",
+    },
+    "loc_documents": {
+        "uk": "Документах", "en": "Documents", "ru": "Документах",
+        "pl": "Dokumentach", "de": "Dokumente", "es": "Documentos",
+    },
+    "loc_project": {
+        "uk": "папці проекту", "en": "project folder", "ru": "папке проекта",
+        "pl": "folderze projektu", "de": "Projektordner", "es": "carpeta del proyecto",
+    },
+    "desktop_opened": {
+        "uk": "Робочий стіл відкрито. 🖥️", "en": "Desktop opened. 🖥️",
+        "ru": "Рабочий стол открыт. 🖥️", "pl": "Pulpit otwarty. 🖥️",
+        "de": "Desktop geöffnet. 🖥️", "es": "Escritorio abierto. 🖥️",
+    },
+    "downloads_opened": {
+        "uk": "Папку Завантаження відкрито. 📂", "en": "Downloads folder opened. 📂",
+        "ru": "Папка Загрузки открыта. 📂", "pl": "Folder Pobrane otwarty. 📂",
+        "de": "Downloads-Ordner geöffnet. 📂", "es": "Carpeta Descargas abierta. 📂",
+    },
+    "documents_opened": {
+        "uk": "Папку Документи відкрито. 📄", "en": "Documents folder opened. 📄",
+        "ru": "Папка Документы открыта. 📄", "pl": "Folder Dokumenty otwarty. 📄",
+        "de": "Dokumenten-Ordner geöffnet. 📄", "es": "Carpeta Documentos abierta. 📄",
+    },
+    "project_opened": {
+        "uk": "Папку проекту відкрито. 📁", "en": "Project folder opened. 📁",
+        "ru": "Папка проекта открыта. 📁", "pl": "Folder projektu otwarty. 📁",
+        "de": "Projektordner geöffnet. 📁", "es": "Carpeta del proyecto abierta. 📁",
+    },
+    "default_browser_info": {
+        "uk": "Твій браузер за замовчуванням — {name}. 🌐",
+        "en": "Your default browser is {name}. 🌐",
+        "ru": "Твой браузер по умолчанию — {name}. 🌐",
+        "pl": "Twoja domyślna przeglądarka to {name}. 🌐",
+        "de": "Dein Standardbrowser ist {name}. 🌐",
+        "es": "Tu navegador predeterminado es {name}. 🌐",
+    },
+    "tab_closed": {
+        "uk": "Вкладку закрито. ✖️", "en": "Tab closed. ✖️",
+        "ru": "Вкладка закрыта. ✖️", "pl": "Karta zamknięta. ✖️",
+        "de": "Tab geschlossen. ✖️", "es": "Pestaña cerrada. ✖️",
+    },
+    "window_closed": {
+        "uk": "Закрив «{title}». ✖️", "en": "Closed '{title}'. ✖️",
+        "ru": "Закрыл «{title}». ✖️", "pl": "Zamknięto «{title}». ✖️",
+        "de": "'{title}' geschlossen. ✖️", "es": "Cerrado '{title}'. ✖️",
+    },
+    "active_window_closed": {
+        "uk": "Закрив активне вікно. ✖️", "en": "Active window closed. ✖️",
+        "ru": "Закрыл активное окно. ✖️", "pl": "Aktywne okno zamknięte. ✖️",
+        "de": "Aktives Fenster geschlossen. ✖️", "es": "Ventana activa cerrada. ✖️",
+    },
+    "close_window_failed": {
+        "uk": "Не вдалося визначити активне вікно для закриття. 🤔",
+        "en": "Could not determine active window to close. 🤔",
+        "ru": "Не удалось определить активное окно для закрытия. 🤔",
+        "pl": "Nie udało się określić aktywnego okna do zamknięcia. 🤔",
+        "de": "Aktives Fenster zum Schließen konnte nicht ermittelt werden. 🤔",
+        "es": "No se pudo determinar la ventana activa para cerrar. 🤔",
+    },
+    "chat_closed": {
+        "uk": "Ховаю чат. 👋<!--ACTION:chat:close-->",
+        "en": "Hiding chat. 👋<!--ACTION:chat:close-->",
+        "ru": "Прячу чат. 👋<!--ACTION:chat:close-->",
+        "pl": "Chowam czat. 👋<!--ACTION:chat:close-->",
+        "de": "Chat wird ausgeblendet. 👋<!--ACTION:chat:close-->",
+        "es": "Ocultando chat. 👋<!--ACTION:chat:close-->",
+    },
+    "app_closed": {
+        "uk": "Закрив «{name}». ✖️", "en": "Closed '{name}'. ✖️",
+        "ru": "Закрыл «{name}». ✖️", "pl": "Zamknięto «{name}». ✖️",
+        "de": "'{name}' geschlossen. ✖️", "es": "Cerrado '{name}'. ✖️",
+    },
+    "new_tab_opened": {
+        "uk": "Нову вкладку відкрито. 🌐", "en": "New tab opened. 🌐",
+        "ru": "Новая вкладка открыта. 🌐", "pl": "Nowa karta otwarta. 🌐",
+        "de": "Neuer Tab geöffnet. 🌐", "es": "Nueva pestaña abierta. 🌐",
+    },
+    "searching_web": {
+        "uk": "Шукаю в браузері: «{query}». 🌐",
+        "en": "Searching in browser: '{query}'. 🌐",
+        "ru": "Ищу в браузере: «{query}». 🌐",
+        "pl": "Szukam w przeglądarce: «{query}». 🌐",
+        "de": "Suche im Browser: '{query}'. 🌐",
+        "es": "Buscando en el navegador: '{query}'. 🌐",
+    },
+    "browser_opened": {
+        "uk": "Відкрив браузер {name}. 🌐", "en": "Opened browser {name}. 🌐",
+        "ru": "Открыл браузер {name}. 🌐", "pl": "Otwarto przeglądarkę {name}. 🌐",
+        "de": "Browser {name} geöffnet. 🌐", "es": "Navegador {name} abierto. 🌐",
+    },
+    "link_opened": {
+        "uk": "Відкрив посилання в браузері. 🌐", "en": "Link opened in browser. 🌐",
+        "ru": "Ссылка открыта в браузере. 🌐", "pl": "Link otwarty w przeglądarce. 🌐",
+        "de": "Link im Browser geöffnet. 🌐", "es": "Enlace abierto en el navegador. 🌐",
+    },
+    "site_opened": {
+        "uk": "{name} відкрито. 🚀", "en": "{name} opened. 🚀",
+        "ru": "{name} открыт. 🚀", "pl": "{name} otwarty. 🚀",
+        "de": "{name} geöffnet. 🚀", "es": "{name} abierto. 🚀",
+    },
+    "app_launched": {
+        "uk": "Запущено {name}. ⚡", "en": "Launched {name}. ⚡",
+        "ru": "Запущено {name}. ⚡", "pl": "Uruchomiono {name}. ⚡",
+        "de": "{name} gestartet. ⚡", "es": "{name} iniciado. ⚡",
+    },
+    "app_fuzzy_launched": {
+        "uk": "Малося на увазі «{name}» — запущено. 🚀",
+        "en": "Meant '{name}' — launched. 🚀",
+        "ru": "Имелось в виду «{name}» — запущено. 🚀",
+        "pl": "Chodziło o «{name}» — uruchomiono. 🚀",
+        "de": "Gemeint war '{name}' — gestartet. 🚀",
+        "es": "Te referías a '{name}' — iniciado. 🚀",
+    },
+    "app_not_found": {
+        "uk": "Програму «{name}» не знайдено серед встановлених. 🤔",
+        "en": "Application '{name}' not found among installed apps. 🤔",
+        "ru": "Программа «{name}» не найдена среди установленных. 🤔",
+        "pl": "Nie znaleziono aplikacji «{name}» wśród zainstalowanych. 🤔",
+        "de": "Anwendung '{name}' nicht gefunden. 🤔",
+        "es": "Aplicación '{name}' no encontrada. 🤔",
+    },
+    "media_paused": {
+        "uk": "Відтворення призупинено. ⏸️", "en": "Playback paused. ⏸️",
+        "ru": "Воспроизведение приостановлено. ⏸️", "pl": "Odtwarzanie wstrzymane. ⏸️",
+        "de": "Wiedergabe pausiert. ⏸️", "es": "Reproducción pausada. ⏸️",
+    },
+    "media_resumed": {
+        "uk": "Відтворення відновлено. 🎵", "en": "Playback resumed. 🎵",
+        "ru": "Воспроизведение возобновлено. 🎵", "pl": "Wznowiono odtwarzanie. 🎵",
+        "de": "Wiedergabe fortgesetzt. 🎵", "es": "Reproducción reanudada. 🎵",
+    },
+    "volume_up": {
+        "uk": "Гучність збільшено. 🔊", "en": "Volume increased. 🔊",
+        "ru": "Громкость увеличена. 🔊", "pl": "Głośność zwiększona. 🔊",
+        "de": "Lautstärke erhöht. 🔊", "es": "Volumen aumentado. 🔊",
+    },
+    "volume_down": {
+        "uk": "Гучність зменшено. 🔉", "en": "Volume decreased. 🔉",
+        "ru": "Громкость уменьшена. 🔉", "pl": "Głośność zmniejszona. 🔉",
+        "de": "Lautstärke verringert. 🔉", "es": "Volumen reducido. 🔉",
+    },
+    "mute": {
+        "uk": "Звук вимкнено. 🔇", "en": "Sound muted. 🔇",
+        "ru": "Звук выключен. 🔇", "pl": "Dźwięk wyciszony. 🔇",
+        "de": "Ton stummgeschaltet. 🔇", "es": "Sonido silenciado. 🔇",
+    },
+    "next_track": {
+        "uk": "Перемкнуто на наступний трек. ⏭️", "en": "Skipped to next track. ⏭️",
+        "ru": "Переключено на следующий трек. ⏭️", "pl": "Przełączono na następny utwór. ⏭️",
+        "de": "Zum nächsten Titel gewechselt. ⏭️", "es": "Saltado a la siguiente pista. ⏭️",
+    },
+    "librewolf_prefer_enabled": {
+        "uk": "Тепер LibreWolf використовується для відкривання посилань. 🐺",
+        "en": "LibreWolf is now set to open web links. 🐺",
+        "ru": "Теперь LibreWolf используется для открытия ссылок. 🐺",
+        "pl": "LibreWolf jest teraz używany do otwierania linków. 🐺",
+        "de": "LibreWolf wird jetzt zum Öffnen von Links verwendet. 🐺",
+        "es": "LibreWolf ahora se usa para abrir enlaces. 🐺",
+    },
+    "librewolf_opened": {
+        "uk": "Відкрив LibreWolf. 🐺", "en": "LibreWolf opened. 🐺",
+        "ru": "Открыл LibreWolf. 🐺", "pl": "Otwarto LibreWolf. 🐺",
+        "de": "LibreWolf geöffnet. 🐺", "es": "LibreWolf abierto. 🐺",
+    },
+    "librewolf_not_found": {
+        "uk": "LibreWolf не знайдено на комп'ютері. 🤔",
+        "en": "LibreWolf was not found on this computer. 🤔",
+        "ru": "LibreWolf не найден на компьютере. 🤔",
+        "pl": "Nie znaleziono LibreWolf na komputerze. 🤔",
+        "de": "LibreWolf wurde auf diesem Computer nicht gefunden. 🤔",
+        "es": "No se encontró LibreWolf en este equipo. 🤔",
+    },
+    "click_success": {
+        "uk": "Натиснув на «{target}» ({x}, {y}). 🖱️",
+        "en": "Clicked on '{target}' ({x}, {y}). 🖱️",
+        "ru": "Нажал на «{target}» ({x}, {y}). 🖱️",
+        "pl": "Kliknięto w «{target}» ({x}, {y}). 🖱️",
+        "de": "Auf '{target}' geklickt ({x}, {y}). 🖱️",
+        "es": "Hizo clic en '{target}' ({x}, {y}). 🖱️",
+    },
+    "click_not_found": {
+        "uk": "Не зміг знайти «{target}» на екрані. 🤔",
+        "en": "Could not find '{target}' on screen. 🤔",
+        "ru": "Не смог найти «{target}» на экране. 🤔",
+        "pl": "Nie udało się znaleźć «{target}» na ekranie. 🤔",
+        "de": "'{target}' konnte auf dem Bildschirm nicht gefunden werden. 🤔",
+        "es": "No se pudo encontrar '{target}' en la pantalla. 🤔",
+    },
+    "screen_error": {
+        "uk": "Не вдалося отримати знімок екрана. 🤔",
+        "en": "Failed to capture screenshot. 🤔",
+        "ru": "Не удалось сделать снимок экрана. 🤔",
+        "pl": "Nie udało się przechwycić ekranu. 🤔",
+        "de": "Screenshot konnte nicht erstellt werden. 🤔",
+        "es": "No se pudo capturar la pantalla. 🤔",
+    },
+}
+
+
+def tr(key: str, lang: str | None = None, **kwargs) -> str:
+    """Format a localized string according to lang."""
+    if not lang:
+        try:
+            import l10n
+            lang = l10n.get_lang()
+        except Exception:
+            lang = "uk"
+    item = LOCALIZED_STRINGS.get(key, {})
+    tmpl = item.get(lang) or item.get("en") or item.get("uk") or key
+    try:
+        return tmpl.format(**kwargs)
+    except Exception:
+        return tmpl
+
+
+# LibreWolf browser support
+_USE_LIBREWOLF_FOR_LINKS: bool = False
+
+
+def find_librewolf() -> str | None:
+    """Find LibreWolf executable path on Windows."""
+    candidates = [
+        r"C:\Program Files\LibreWolf\librewolf.exe",
+        r"C:\Program Files (x86)\LibreWolf\librewolf.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\LibreWolf\librewolf.exe"),
+        os.path.expandvars(r"%APPDATA%\LibreWolf\librewolf.exe"),
+        shutil.which("librewolf.exe") or "",
+        shutil.which("librewolf") or "",
+    ]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            with winreg.OpenKey(root, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\librewolf.exe") as k:
+                val, _ = winreg.QueryValueEx(k, "")
+                if val and os.path.exists(val):
+                    return val
+        except Exception:
+            pass
+    return None
+
+
+def set_prefer_librewolf(enable: bool = True) -> None:
+    """Set LibreWolf as preferred browser for opening links."""
+    global _USE_LIBREWOLF_FOR_LINKS, _DEFAULT_BROWSER_CACHE
+    _USE_LIBREWOLF_FOR_LINKS = enable
+    _DEFAULT_BROWSER_CACHE.clear()
+
+
+def open_in_librewolf(target: str = "") -> bool:
+    """Open target URL or search query specifically in LibreWolf."""
+    lw = find_librewolf()
+    if not lw:
+        return open_in_browser(target)
+    target = (target or "").strip()
+    if not target:
+        try:
+            subprocess.Popen([lw])
+            return True
+        except Exception:
+            return False
+    if not (target.startswith("http://") or target.startswith("https://")):
+        if re.match(r"^(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?:/.*)?$", target):
+            url = "https://" + target
+        else:
+            url = f"https://www.google.com/search?q={urllib.parse.quote_plus(target)}"
+    else:
+        url = target
+    try:
+        subprocess.Popen([lw, url])
+        return True
+    except Exception:
+        return False
+
+
+# Screen Vision & GUI Click Automation
+def capture_screen_image() -> tuple[object | None, int, int]:
+    """Capture screen as PIL Image and return (image, width, height)."""
+    try:
+        from PIL import ImageGrab
+        im = ImageGrab.grab()
+        if im and im.width > 0 and im.height > 0:
+            return im, im.width, im.height
+    except Exception:
+        pass
+
+    try:
+        import mss
+        from PIL import Image
+        with mss.MSS() as sct:
+            mon = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+            shot = sct.grab(mon)
+            im = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+            if im and im.width > 0 and im.height > 0:
+                return im, im.width, im.height
+    except Exception:
+        pass
+
+    return None, 0, 0
+
+
+def _get_gemini_key() -> str | None:
+    if os.environ.get("GEMINI_API_KEY"):
+        return os.environ["GEMINI_API_KEY"]
+    try:
+        keys_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keys.json")
+        with open(keys_file, encoding="utf-8") as f:
+            return json.load(f).get("GEMINI_API_KEY")
+    except Exception:
+        return None
+
+
+def _query_gemini_vision(prompt: str, b64_img: str, json_mode: bool = False, timeout: int = 15) -> str | None:
+    key = _get_gemini_key()
+    if not key:
+        return None
+    models = ["gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-3.8-flash"]
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}},
+                ]
+            }
+        ]
+    }
+    if json_mode:
+        payload["generationConfig"] = {"response_mime_type": "application/json"}
+
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json", "User-Agent": "claudie-vision"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                res = json.loads(r.read().decode("utf-8"))
+                return res["candidates"][0]["content"]["parts"][0]["text"].strip()
+        except Exception:
+            continue
+    return None
+
+
+def inspect_screen_vision(b64_img: str, lang: str = "uk") -> str | None:
+    """Ask Gemini Vision to inspect what is on the screen."""
+    import freeai
+    lang_name = freeai.LANGS.get(lang, (None, "Ukrainian"))[1]
+    prompt = (
+        f"You are an intelligent desktop assistant observing the user's screen. "
+        f"Describe what is happening on screen or what open window/task is visible in 1-2 short factual sentences "
+        f"(max 25 words). Reply in {lang_name}. Strictly by facts, zero baby talk, zero rudeness. One emoji max. No quotes."
+    )
+    return _query_gemini_vision(prompt, b64_img, json_mode=False)
+
+
+def locate_target_coordinates(b64_img: str, width: int, height: int, target: str) -> dict[str, object]:
+    """Ask Gemini Vision to find pixel coordinates (center) of target on screenshot."""
+    prompt = (
+        f"You are an accurate screen GUI element locator. The screenshot resolution is {width}x{height} pixels.\n"
+        f"Locate the element or text: '{target}'.\n"
+        "Return ONLY a JSON object: {\"found\": true, \"x\": <int>, \"y\": <int>} where x and y are the exact pixel "
+        "coordinates of the center of the element to click.\n"
+        "If the element cannot be found or is not visible, return {\"found\": false}."
+    )
+    raw = _query_gemini_vision(prompt, b64_img, json_mode=True)
+    if not raw:
+        return {"found": False}
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    m = re.search(r'\"found\"\s*:\s*(true|false)', raw, re.IGNORECASE)
+    if m:
+        found = m.group(1).lower() == "true"
+        x_m = re.search(r'\"x\"\s*:\s*(\d+)', raw)
+        y_m = re.search(r'\"y\"\s*:\s*(\d+)', raw)
+        if found and x_m and y_m:
+            return {"found": True, "x": int(x_m.group(1)), "y": int(y_m.group(1))}
+    return {"found": False}
+
+
+def take_screenshot_and_inspect(lang: str = "uk") -> tuple[bool, str]:
+    """Capture screen, inspect via vision AI, and delete the screenshot file."""
+    im, w, h = capture_screen_image()
+    if not im:
+        return False, tr("screen_error", lang)
+
+    tmp_path = os.path.join(tempfile.gettempdir(), f"claudie_screen_{int(time.time()*1000)}.jpg")
+    try:
+        im.save(tmp_path, "JPEG", quality=85)
+        with open(tmp_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        desc = inspect_screen_vision(b64, lang=lang)
+        if desc:
+            return True, desc
+        return False, tr("screen_error", lang)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
+def take_screenshot_and_click(target: str, lang: str = "uk") -> tuple[bool, str]:
+    """Capture screen, find coordinates of target, click on it, and delete screenshot."""
+    im, w, h = capture_screen_image()
+    if not im:
+        return False, tr("screen_error", lang)
+
+    tmp_path = os.path.join(tempfile.gettempdir(), f"claudie_click_{int(time.time()*1000)}.jpg")
+    try:
+        im.save(tmp_path, "JPEG", quality=85)
+        with open(tmp_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        coords = locate_target_coordinates(b64, w, h, target)
+        if coords and coords.get("found"):
+            x = max(0, min(w - 1, int(coords.get("x", 0))))
+            y = max(0, min(h - 1, int(coords.get("y", 0))))
+            # Move mouse and click
+            u = ctypes.windll.user32
+            u.SetCursorPos(x, y)
+            time.sleep(0.05)
+            u.mouse_event(0x0002, 0, 0, 0, 0)
+            time.sleep(0.05)
+            u.mouse_event(0x0004, 0, 0, 0, 0)
+            return True, tr("click_success", lang, target=target, x=x, y=y)
+        else:
+            return True, tr("click_not_found", lang, target=target)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
 # Windows Default Browser and Window Management helpers
 _DEFAULT_BROWSER_CACHE: dict[str, str] = {}
 _DEFAULT_BROWSER_TIME: float = 0.0
@@ -452,9 +923,14 @@ def get_default_browser() -> dict[str, str]:
     return res
 
 
-def open_in_browser(target: str = "") -> bool:
-    """Open a URL, search query, or empty browser in the user's default browser."""
+def open_in_browser(target: str = "", prefer_browser: str | None = None) -> bool:
+    """Open a URL, search query, or empty browser in default or preferred browser."""
     target = (target or "").strip()
+    if prefer_browser == "librewolf" or _USE_LIBREWOLF_FOR_LINKS:
+        lw = find_librewolf()
+        if lw:
+            return open_in_librewolf(target)
+
     b_info = get_default_browser()
     exe = b_info.get("exe")
 
@@ -490,16 +966,16 @@ def open_in_browser(target: str = "") -> bool:
         return False
 
 
-def open_web_search(query: str) -> bool:
-    """Search Google in the default browser."""
+def open_web_search(query: str, prefer_browser: str | None = None) -> bool:
+    """Search Google in the default or preferred browser."""
     q = (query or "").strip()
     if not q:
-        return open_in_browser("")
+        return open_in_browser("", prefer_browser=prefer_browser)
     url = f"https://www.google.com/search?q={urllib.parse.quote_plus(q)}"
-    return open_in_browser(url)
+    return open_in_browser(url, prefer_browser=prefer_browser)
 
 
-def new_browser_tab() -> tuple[bool, str]:
+def new_browser_tab(lang: str | None = None) -> tuple[bool, str]:
     """Open a new tab in browser (Ctrl + T) or launch default browser."""
     try:
         u = ctypes.windll.user32
@@ -507,13 +983,14 @@ def new_browser_tab() -> tuple[bool, str]:
         u.keybd_event(0x54, 0, 0, 0)
         u.keybd_event(0x54, 0, 2, 0)
         u.keybd_event(0x11, 0, 2, 0)
-        return True, "Нову вкладку відкрито. 🌐"
+        return True, tr("new_tab_opened", lang)
     except Exception:
         open_in_browser("")
-        return True, "Браузер відкрито. 🌐"
+        b_info = get_default_browser()
+        return True, tr("browser_opened", lang, name=b_info.get("name", "Браузер"))
 
 
-def close_tab() -> tuple[bool, str]:
+def close_tab(lang: str | None = None) -> tuple[bool, str]:
     """Close the current tab (Ctrl + W)."""
     try:
         u = ctypes.windll.user32
@@ -521,12 +998,14 @@ def close_tab() -> tuple[bool, str]:
         u.keybd_event(0x57, 0, 0, 0)
         u.keybd_event(0x57, 0, 2, 0)
         u.keybd_event(0x11, 0, 2, 0)
-        return True, "Вкладку закрито. ✖️"
+        return True, tr("tab_closed", lang)
     except Exception as e:
         return False, f"Помилка закриття вкладки: {e}"
 
 
-def close_active_window(active_title: str = "", active_pname: str = "") -> tuple[bool, str]:
+def close_active_window(
+    active_title: str = "", active_pname: str = "", lang: str | None = None
+) -> tuple[bool, str]:
     """Close the currently active user window gracefully."""
     u = ctypes.windll.user32
     my_pid = os.getpid()
@@ -571,8 +1050,9 @@ def close_active_window(active_title: str = "", active_pname: str = "") -> tuple
 
     if target_hwnd:
         u.PostMessageW(target_hwnd, 0x0010, 0, 0)  # WM_CLOSE
-        label = f" «{target_title}»" if target_title else " активне вікно"
-        return True, f"Закрив{label}. ✖️"
+        if target_title:
+            return True, tr("window_closed", lang, title=target_title)
+        return True, tr("active_window_closed", lang)
 
     # Fallback Alt+F4
     try:
@@ -580,18 +1060,18 @@ def close_active_window(active_title: str = "", active_pname: str = "") -> tuple
         u.keybd_event(0x73, 0, 0, 0)  # VK_F4
         u.keybd_event(0x73, 0, 2, 0)
         u.keybd_event(0x12, 0, 2, 0)
-        return True, "Закрив активне вікно. ✖️"
+        return True, tr("active_window_closed", lang)
     except Exception:
         pass
 
     if active_pname and not any(k in active_pname.lower() for k in ("python", "explorer", "claud")):
         try:
             subprocess.run(f'taskkill /IM "{active_pname}"', shell=True, capture_output=True)
-            return True, f"Закрив вікно {active_pname}. ✖️"
+            return True, tr("window_closed", lang, title=active_pname)
         except Exception:
             pass
 
-    return False, "Не вдалося визначити активне вікно для закриття. 🤔"
+    return False, tr("close_window_failed", lang)
 
 
 def _close_process_gracefully(exe_name: str, title_pattern: str = "") -> bool:
@@ -653,7 +1133,7 @@ def _close_process_gracefully(exe_name: str, title_pattern: str = "") -> bool:
     return success
 
 
-def close_app_by_name(query: str) -> tuple[bool, str]:
+def close_app_by_name(query: str, lang: str | None = None) -> tuple[bool, str]:
     """Close a specific application by name, window title, or process."""
     q = query.strip().lower()
     q = re.sub(r"^(?:програму|додаток|приложение|app|прогу|вікно|процес)\s+", "", q).strip(' \t\r\n:"\'')
@@ -665,7 +1145,11 @@ def close_app_by_name(query: str) -> tuple[bool, str]:
         exe = os.path.basename(b_info.get("exe", "msedge.exe"))
         name = b_info.get("name", "Браузер")
         _close_process_gracefully(exe)
-        return True, f"Закрив «{name}». ✖️"
+        return True, tr("app_closed", lang, name=name)
+
+    if q in ("librewolf", "лібревулф", "лібревольф", "либревулф"):
+        _close_process_gracefully("librewolf.exe", title_pattern="librewolf")
+        return True, tr("app_closed", lang, name="LibreWolf")
 
     target, display_name, _ = resolve_app_target(q)
     exe_name = ""
@@ -690,18 +1174,67 @@ def close_app_by_name(query: str) -> tuple[bool, str]:
         exe_name = candidate
 
     _close_process_gracefully(exe_name, title_pattern=q)
-    return True, f"Закрив «{display_name}». ✖️"
+    return True, tr("app_closed", lang, name=display_name)
 
 
 def handle_local_intent(
-    text: str, cwd: str | None = None, active_title: str = "", active_pname: str = ""
+    text: str, cwd: str | None = None, active_title: str = "", active_pname: str = "", lang: str | None = None
 ) -> tuple[bool, str | None]:
     """Check if user query is a direct PC command.
     Returns (handled: bool, mascot_reply: str | None)."""
     t = text.strip()
     low = t.lower()
 
-    # 1. CREATE FOLDER
+    if not lang:
+        try:
+            import l10n
+            lang = l10n.get_lang()
+        except Exception:
+            lang = "uk"
+
+    # 1. SCREEN INSPECTION
+    if any(re.search(p, low) for p in (
+        r"(?:подивись|подивися|глянь|передивись|переглянь|посмотри)\s+(?:на\s+)?(?:екран|экран|дисплей|screen)",
+        r"(?:що|что|what)\s+(?:зараз\s+|сейчас\s+)?(?:на\s+)?(?:екрані|экране|screen)",
+        r"(?:зроби|сделай|take)\s+(?:скрін|скрин|скріншот|скриншот|screenshot)\s+(?:і|и|and)\s+(?:подивись|глянь|look)",
+        r"(?:look\s+at\s+screen|inspect\s+screen)",
+    )):
+        ok, desc = take_screenshot_and_inspect(lang=lang)
+        return True, desc
+
+    # 2. SCREEN CLICK (calculate coordinates and click)
+    click_m = re.search(r"^(?:натисни|клікни|клацни|нажми|тыкни|click|press)\s+(?:на\s+|по\s+|on\s+)?(.+)", low)
+    if click_m:
+        target_el = click_m.group(1).strip(' \t\r\n:"\'')
+        if not any(target_el.lower() == m for m in ("паузу", "пауза", "плей", "play", "pause", "стоп")):
+            ok, click_rep = take_screenshot_and_click(target_el, lang=lang)
+            return True, click_rep
+
+    # 3. LIBREWOLF SUPPORT
+    if any(k in low for k in ("використовуй librewolf для ссилок", "відкривай ссилки в librewolf", "зроби librewolf основним", "use librewolf for links")):
+        set_prefer_librewolf(True)
+        return True, tr("librewolf_prefer_enabled", lang)
+
+    lw_open_m = (
+        re.search(r"^(?:відкрий|відкрити|запусти|open)\s+(?:в\s+|через\s+|in\s+)?librewolf\s*(.*)", low)
+        or re.search(r"^(?:відкрий|відкрити|запусти)\s+(?:в\s+|через\s+)?(?:лібревулф|лібревольф|либревулф)\s*(.*)", low)
+    )
+    if lw_open_m:
+        target_link = lw_open_m.group(1).strip()
+        lw = find_librewolf()
+        if not lw:
+            return True, tr("librewolf_not_found", lang)
+        open_in_librewolf(target_link)
+        if target_link:
+            return True, tr("link_opened", lang)
+        return True, tr("librewolf_opened", lang)
+
+    if re.search(r"^(?:загугли|пошукай)\s+(?:в\s+|через\s+)?(?:librewolf|лібревулф|лібревольф)\s+(.+)", low):
+        q_term = re.sub(r"^(?:загугли|пошукай)\s+(?:в\s+|через\s+)?(?:librewolf|лібревулф|лібревольф)\s+", "", low).strip()
+        open_in_librewolf(q_term)
+        return True, tr("searching_web", lang, query=q_term)
+
+    # 4. CREATE FOLDER
     create_match = re.search(
         r"(?:створ(?:и|ить|яй)?|создай(?:те)?|зроби|create|make)\s+(?:нову\s+|новую\s+|new\s+)?(?:папку|директорію|директорию|каталог|folder|dir)(.*)",
         t, re.IGNORECASE,
@@ -726,29 +1259,30 @@ def handle_local_intent(
         # Extract clean folder name
         name = re.sub(r"^(?:під назвою|з назвою|с именем|named|called|ім'я|имя|\"|\')+", "", rest, flags=re.IGNORECASE).strip(' \t\r\n:"\'')
         path, loc_label, final_name = create_user_folder(name=name, location=loc, cwd=cwd)
-        return True, f"Папку «{final_name}» створено на {loc_label}. 📁"
+        loc_str = tr(f"loc_{loc}" if loc else "loc_desktop", lang)
+        return True, tr("folder_created", lang, name=final_name, loc=loc_str)
 
-    # 2. OPEN SPECIAL FOLDERS
+    # 5. OPEN SPECIAL FOLDERS
     if re.search(r"(?:відкрий|открой|open)\s+(?:папку\s+)?(?:робоч(?:ий|ого)\s+стіл|рабочий\s+стол|desktop|десктоп)", low):
         try:
             os.startfile(DESKTOP)
         except Exception:
             pass
-        return True, "Робочий стіл відкрито. 🖥️"
+        return True, tr("desktop_opened", lang)
 
     if re.search(r"(?:відкрий|открой|open)\s+(?:папку\s+)?(?:завантаженн(?:я|ь)|downloads|загрузк(?:и|ек))", low):
         try:
             os.startfile(DOWNLOADS)
         except Exception:
             pass
-        return True, "Папку Завантаження відкрито. 📂"
+        return True, tr("downloads_opened", lang)
 
     if re.search(r"(?:відкрий|открой|open)\s+(?:папку\s+)?(?:документ(?:и|ів)|documents)", low):
         try:
             os.startfile(DOCUMENTS)
         except Exception:
             pass
-        return True, "Папку Документи відкрито. 📄"
+        return True, tr("documents_opened", lang)
 
     if re.search(r"(?:відкрий|открой|open)\s+(?:папку\s+)?(?:проект(?:у|а)?|проєкт(?:у|а)?|project|файли)", low):
         folder = cwd if (cwd and os.path.exists(cwd)) else DESKTOP
@@ -756,70 +1290,70 @@ def handle_local_intent(
             os.startfile(folder)
         except Exception:
             pass
-        return True, "Папку проекту відкрито. 📁"
+        return True, tr("project_opened", lang)
 
-    # 3. DEFAULT BROWSER QUERY
+    # 6. DEFAULT BROWSER QUERY
     if any(k in low for k in ("браузер по дефолту", "браузер за замовчуванням", "браузер по замовчуванню", "браузер по умолчанию", "дефолтний браузер", "дефолтный браузер")) or (
         re.search(r"(?:який|какой|що|what).*(?:браузер|browser)", low) and not any(k in low for k in ("відкрий", "запусти", "закрий", "скачай"))
     ):
         b_info = get_default_browser()
-        return True, f"Твій браузер за замовчуванням — {b_info['name']}. 🌐"
+        return True, tr("default_browser_info", lang, name=b_info["name"])
 
-    # 4. WINDOW & TAB CLOSING
+    # 7. WINDOW & TAB CLOSING
     if re.search(r"^(?:закрий|закрити|close)\s+(?:цю\s+)?(?:вкладку|таб|tab)$", low):
-        _, reply = close_tab()
+        _, reply = close_tab(lang=lang)
         return True, reply
 
     if re.search(r"^(?:закрий|закрити|close)\s+(?:це\s+|поточне\s+|активне\s+)?вікно$", low) or re.search(r"^(?:закрий|закрити|close)\s+це$", low):
-        _, reply = close_active_window(active_title=active_title, active_pname=active_pname)
+        _, reply = close_active_window(active_title=active_title, active_pname=active_pname, lang=lang)
         return True, reply
 
     if re.search(r"^(?:закрий|закрити|close|сховай)\s+(?:чат|діалог|вікно чату)$", low) or low in ("закрийся", "сховайся", "закрий чат"):
-        return True, "Ховаю чат. 👋<!--ACTION:chat:close-->"
+        return True, tr("chat_closed", lang)
 
     close_app_m = re.search(r"^(?:закрий|закрити|close|вигрузи|закрий програму|закрий процес)\s+(.+)", low)
     if close_app_m:
         app_target = close_app_m.group(1).strip()
         if app_target not in ("вкладку", "таб", "tab", "вікно", "це вікно", "активне вікно", "поточне вікно", "чат"):
-            _, reply = close_app_by_name(app_target)
+            _, reply = close_app_by_name(app_target, lang=lang)
             return True, reply
 
-    # 5. BROWSER NAVIGATION & WEB SEARCH
+    # 8. BROWSER NAVIGATION & WEB SEARCH
     if re.search(r"^(?:нова вкладка|відкрий нову вкладку|новий таб|new tab)$", low):
-        _, reply = new_browser_tab()
+        _, reply = new_browser_tab(lang=lang)
         return True, reply
 
     search_m = re.search(r"^(?:загугли|гугли|пошукай в інтернеті|пошукай в гуглі|знайди в інтернеті|знайди в гуглі|search|пошукай)\s+(.+)", low)
     if search_m:
         query = search_m.group(1).strip()
         open_web_search(query)
-        return True, f"Шукаю в браузері: «{query}». 🌐"
+        return True, tr("searching_web", lang, query=query)
 
     if low.startswith("знайди "):
         rest = t[7:].strip()
         if rest and not any(rest.lower().startswith(k) for k in ("папку", "файл", "програму", "додаток")):
             open_web_search(rest)
-            return True, f"Шукаю в браузері: «{rest}». 🌐"
+            return True, tr("searching_web", lang, query=rest)
 
     if re.search(r"^(?:відкрий|відкрити|запусти|open)\s+(?:браузер|browser)$", low):
         b_info = get_default_browser()
         open_in_browser("")
-        return True, f"Відкрив браузер {b_info['name']}. 🌐"
+        return True, tr("browser_opened", lang, name=b_info["name"])
 
     url_m = re.search(r"^(?:відкрий|відкрити|open)\s+(https?://\S+|www\.\S+|\S+\.(?:com|org|net|io|ua|tv|gov|edu|dev)\S*)$", low)
     if url_m:
         u_target = url_m.group(1).strip()
         open_in_browser(u_target)
-        return True, "Відкрив посилання в браузері. 🌐"
+        return True, tr("link_opened", lang)
 
-    # 6. OPEN WEBSITES
+    # 9. OPEN WEBSITES
     for kw, url in KNOWN_URLS.items():
         if re.search(rf"(?:відкрий|открой|open)\s+{kw}\b", low):
             open_in_browser(url)
             name_cap = kw.capitalize()
-            return True, f"{name_cap} відкрито. 🚀"
+            return True, tr("site_opened", lang, name=name_cap)
 
-    # 7. OPEN / LAUNCH APPS (with Program Files scanning & fuzzy matching)
+    # 10. OPEN / LAUNCH APPS (with Program Files scanning & fuzzy matching)
     open_app_m = re.search(r"^(?:відкрий|відкрити|открой|открыть|open|запусти|запустити|запустить|launch|start)\s+(.+)", low)
     if open_app_m:
         app_query = open_app_m.group(1).strip()
@@ -828,40 +1362,40 @@ def handle_local_intent(
             launched = launch_target(target, display_name)
             if launched:
                 if is_fuzzy:
-                    return True, f"Малося на увазі «{display_name}» — запущено. 🚀"
-                return True, f"Запущено {display_name}. ⚡"
+                    return True, tr("app_fuzzy_launched", lang, name=display_name)
+                return True, tr("app_launched", lang, name=display_name)
         else:
-            return True, f"Програму «{app_query}» не знайдено серед встановлених. 🤔"
+            return True, tr("app_not_found", lang, name=app_query)
 
-    # 5. MEDIA CONTROLS
+    # 11. MEDIA CONTROLS
     if re.search(r"^(?:пауза|постав на паузу|стоп музика|пауза музика|pause)$", low) or "постав музику на паузу" in low:
         send_media_key(0xB3)  # VK_MEDIA_PLAY_PAUSE
-        return True, "Відтворення призупинено. ⏸️"
+        return True, tr("media_paused", lang)
 
     if re.search(r"^(?:плей|продовж|продовжити|play|resume)$", low) or "увімкни музику" in low or "включи музику" in low:
         send_media_key(0xB3)  # VK_MEDIA_PLAY_PAUSE
-        return True, "Відтворення відновлено. 🎵"
+        return True, tr("media_resumed", lang)
 
     if "голосніше" in low or "добав звук" in low or "додай звук" in low or "volume up" in low:
         send_media_key(0xAF, 4)  # VK_VOLUME_UP
-        return True, "Гучність збільшено. 🔊"
+        return True, tr("volume_up", lang)
 
     if "тихіше" in low or "зменш звук" in low or "убав звук" in low or "volume down" in low:
         send_media_key(0xAE, 4)  # VK_VOLUME_DOWN
-        return True, "Гучність зменшено. 🔉"
+        return True, tr("volume_down", lang)
 
     if "вимкни звук" in low or "без звуку" in low or "мут" in low or "mute" in low:
         send_media_key(0xAD)  # VK_VOLUME_MUTE
-        return True, "Звук вимкнено. 🔇"
+        return True, tr("mute", lang)
 
     if "наступний трек" in low or "наступна пісня" in low or "next track" in low or "переключи" in low:
         send_media_key(0xB0)  # VK_MEDIA_NEXT_TRACK
-        return True, "Перемкнуто на наступний трек. ⏭️"
+        return True, tr("next_track", lang)
 
     return False, None
 
 
-def execute_action_tag(tag: str, cwd: str | None = None) -> bool:
+def execute_action_tag(tag: str, cwd: str | None = None, lang: str | None = None) -> bool:
     """Execute an action extracted from LLM reply (e.g. create_folder:..., app:..., url:...)."""
     tag = tag.strip()
     if not tag:
@@ -894,21 +1428,39 @@ def execute_action_tag(tag: str, cwd: str | None = None) -> bool:
             os.startfile(folder)
             return True
 
+        if tag == "screen_inspect":
+            ok, desc = take_screenshot_and_inspect(lang=lang)
+            return desc if ok else False
+
+        if tag.startswith("screen_click:"):
+            target = tag[13:].strip()
+            ok, rep = take_screenshot_and_click(target, lang=lang)
+            return rep if ok else False
+
+        if tag.startswith("librewolf_open:"):
+            url = tag[15:].strip()
+            open_in_librewolf(url)
+            return True
+
+        if tag == "librewolf_prefer":
+            set_prefer_librewolf(True)
+            return True
+
         if tag == "close_window":
-            close_active_window()
+            close_active_window(lang=lang)
             return True
 
         if tag == "close_tab":
-            close_tab()
+            close_tab(lang=lang)
             return True
 
         if tag.startswith("close_app:"):
             app_name = tag[10:].strip()
-            close_app_by_name(app_name)
+            close_app_by_name(app_name, lang=lang)
             return True
 
         if tag == "new_tab":
-            new_browser_tab()
+            new_browser_tab(lang=lang)
             return True
 
         if tag.startswith("browser_search:"):
