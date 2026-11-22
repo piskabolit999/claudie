@@ -1,13 +1,15 @@
 """PC actions and intent recognition for Claudie.
 
 Handles desktop actions: creating folders, opening apps, opening folders/URLs,
-and controlling media on Windows.
+and controlling media on Windows with full Program Files search and fuzzy typo matching.
 """
 import ctypes
+import difflib
 import os
 import re
 import shutil
 import subprocess
+import time
 import webbrowser
 
 # Special Windows folder paths
@@ -15,48 +17,81 @@ DESKTOP = os.path.join(os.path.expanduser("~"), "Desktop")
 DOWNLOADS = os.path.join(os.path.expanduser("~"), "Downloads")
 DOCUMENTS = os.path.join(os.path.expanduser("~"), "Documents")
 
-# Protocol and app mapping
+CYR_TO_LAT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "ґ": "g", "д": "d", "е": "e", "є": "ye",
+    "ж": "zh", "з": "z", "и": "y", "і": "i", "ї": "yi", "й": "y", "к": "k", "л": "l",
+    "м": "m", "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch", "ь": "",
+    "ю": "yu", "я": "ya", "ы": "y", "э": "e", "ъ": "", "ё": "yo",
+}
+
+
+def transliterate(s: str) -> str:
+    """Convert Ukrainian/Russian Cyrillic to phonetic Latin."""
+    return "".join(CYR_TO_LAT.get(c, c) for c in (s or "").lower()).strip()
+
+
+# Common aliases mapping user input variants to canonical name and protocol
 KNOWN_APPS = {
-    "telegram": {"exe": "telegram.exe", "proto": "tg://"},
-    "телеграм": {"exe": "telegram.exe", "proto": "tg://"},
-    "тг": {"exe": "telegram.exe", "proto": "tg://"},
-    "steam": {"exe": "steam.exe", "proto": "steam://"},
-    "стім": {"exe": "steam.exe", "proto": "steam://"},
-    "стим": {"exe": "steam.exe", "proto": "steam://"},
-    "discord": {"exe": "Discord.exe", "proto": "discord://"},
-    "діскорд": {"exe": "Discord.exe", "proto": "discord://"},
-    "дискорд": {"exe": "Discord.exe", "proto": "discord://"},
-    "spotify": {"exe": "Spotify.exe", "proto": "spotify://"},
-    "спотіфай": {"exe": "Spotify.exe", "proto": "spotify://"},
-    "спотифай": {"exe": "Spotify.exe", "proto": "spotify://"},
-    "calc": {"exe": "calc.exe"},
-    "calculator": {"exe": "calc.exe"},
-    "калькулятор": {"exe": "calc.exe"},
-    "notepad": {"exe": "notepad.exe"},
-    "блокнот": {"exe": "notepad.exe"},
-    "terminal": {"exe": "wt.exe", "fallback": "powershell.exe"},
-    "термінал": {"exe": "wt.exe", "fallback": "powershell.exe"},
-    "терминал": {"exe": "wt.exe", "fallback": "powershell.exe"},
-    "консоль": {"exe": "powershell.exe"},
-    "powershell": {"exe": "powershell.exe"},
-    "cmd": {"exe": "cmd.exe"},
-    "paint": {"exe": "mspaint.exe"},
-    "пейнт": {"exe": "mspaint.exe"},
-    "taskmgr": {"exe": "taskmgr.exe"},
-    "диспетчер": {"exe": "taskmgr.exe"},
-    "диспетчер задач": {"exe": "taskmgr.exe"},
-    "explorer": {"exe": "explorer.exe"},
-    "провідник": {"exe": "explorer.exe"},
-    "проводник": {"exe": "explorer.exe"},
-    "code": {"exe": "code.cmd", "fallback": "code.exe"},
-    "vs code": {"exe": "code.cmd", "fallback": "code.exe"},
-    "vscode": {"exe": "code.cmd", "fallback": "code.exe"},
-    "chrome": {"exe": "chrome.exe"},
-    "хром": {"exe": "chrome.exe"},
-    "edge": {"exe": "msedge.exe"},
-    "едж": {"exe": "msedge.exe"},
-    "браузер": {"exe": "msedge.exe", "fallback": "chrome.exe"},
-    "browser": {"exe": "msedge.exe", "fallback": "chrome.exe"},
+    "telegram": {"name": "Telegram", "exe": "telegram.exe", "proto": "tg://"},
+    "телеграм": {"name": "Telegram", "exe": "telegram.exe", "proto": "tg://"},
+    "телега": {"name": "Telegram", "exe": "telegram.exe", "proto": "tg://"},
+    "тг": {"name": "Telegram", "exe": "telegram.exe", "proto": "tg://"},
+    "steam": {"name": "Steam", "exe": "steam.exe", "proto": "steam://"},
+    "стім": {"name": "Steam", "exe": "steam.exe", "proto": "steam://"},
+    "стим": {"name": "Steam", "exe": "steam.exe", "proto": "steam://"},
+    "discord": {"name": "Discord", "exe": "Discord.exe", "proto": "discord://"},
+    "діскорд": {"name": "Discord", "exe": "Discord.exe", "proto": "discord://"},
+    "дискорд": {"name": "Discord", "exe": "Discord.exe", "proto": "discord://"},
+    "дс": {"name": "Discord", "exe": "Discord.exe", "proto": "discord://"},
+    "spotify": {"name": "Spotify", "exe": "Spotify.exe", "proto": "spotify://"},
+    "спотіфай": {"name": "Spotify", "exe": "Spotify.exe", "proto": "spotify://"},
+    "спотифай": {"name": "Spotify", "exe": "Spotify.exe", "proto": "spotify://"},
+    "спотік": {"name": "Spotify", "exe": "Spotify.exe", "proto": "spotify://"},
+    "calc": {"name": "Калькулятор", "exe": "calc.exe"},
+    "calculator": {"name": "Калькулятор", "exe": "calc.exe"},
+    "калькулятор": {"name": "Калькулятор", "exe": "calc.exe"},
+    "кальк": {"name": "Калькулятор", "exe": "calc.exe"},
+    "notepad": {"name": "Блокнот", "exe": "notepad.exe"},
+    "блокнот": {"name": "Блокнот", "exe": "notepad.exe"},
+    "блокнотик": {"name": "Блокнот", "exe": "notepad.exe"},
+    "terminal": {"name": "Термінал", "exe": "wt.exe", "fallback": "powershell.exe"},
+    "термінал": {"name": "Термінал", "exe": "wt.exe", "fallback": "powershell.exe"},
+    "терминал": {"name": "Термінал", "exe": "wt.exe", "fallback": "powershell.exe"},
+    "консоль": {"name": "PowerShell", "exe": "powershell.exe"},
+    "powershell": {"name": "PowerShell", "exe": "powershell.exe"},
+    "cmd": {"name": "Командний рядок", "exe": "cmd.exe"},
+    "paint": {"name": "Paint", "exe": "mspaint.exe"},
+    "пейнт": {"name": "Paint", "exe": "mspaint.exe"},
+    "паінт": {"name": "Paint", "exe": "mspaint.exe"},
+    "taskmgr": {"name": "Диспетчер завдань", "exe": "taskmgr.exe"},
+    "диспетчер": {"name": "Диспетчер завдань", "exe": "taskmgr.exe"},
+    "диспетчер задач": {"name": "Диспетчер завдань", "exe": "taskmgr.exe"},
+    "explorer": {"name": "Провідник", "exe": "explorer.exe"},
+    "провідник": {"name": "Провідник", "exe": "explorer.exe"},
+    "проводник": {"name": "Провідник", "exe": "explorer.exe"},
+    "code": {"name": "Visual Studio Code", "exe": "code.cmd", "fallback": "code.exe"},
+    "vs code": {"name": "Visual Studio Code", "exe": "code.cmd", "fallback": "code.exe"},
+    "vscode": {"name": "Visual Studio Code", "exe": "code.cmd", "fallback": "code.exe"},
+    "вскод": {"name": "Visual Studio Code", "exe": "code.cmd", "fallback": "code.exe"},
+    "chrome": {"name": "Google Chrome", "exe": "chrome.exe"},
+    "хром": {"name": "Google Chrome", "exe": "chrome.exe"},
+    "edge": {"name": "Microsoft Edge", "exe": "msedge.exe"},
+    "едж": {"name": "Microsoft Edge", "exe": "msedge.exe"},
+    "opera": {"name": "Opera", "exe": "opera.exe"},
+    "опера": {"name": "Opera", "exe": "opera.exe"},
+    "браузер": {"name": "Браузер", "exe": "msedge.exe", "fallback": "chrome.exe"},
+    "browser": {"name": "Браузер", "exe": "msedge.exe", "fallback": "chrome.exe"},
+    "canva": {"name": "Canva", "exe": "Canva.exe"},
+    "канва": {"name": "Canva", "exe": "Canva.exe"},
+    "anydesk": {"name": "AnyDesk", "exe": "AnyDesk.exe"},
+    "енідіск": {"name": "AnyDesk", "exe": "AnyDesk.exe"},
+    "анідеск": {"name": "AnyDesk", "exe": "AnyDesk.exe"},
+    "cheat engine": {"name": "Cheat Engine", "exe": "Cheat Engine.exe"},
+    "чит енджин": {"name": "Cheat Engine", "exe": "Cheat Engine.exe"},
+    "everything": {"name": "Everything", "exe": "Everything.exe"},
+    "burp suite": {"name": "Burp Suite", "exe": "BurpSuite.exe"},
+    "бурп": {"name": "Burp Suite", "exe": "BurpSuite.exe"},
 }
 
 KNOWN_URLS = {
@@ -75,70 +110,185 @@ KNOWN_URLS = {
     "нетфлікс": "https://netflix.com",
 }
 
-
-def send_media_key(key_code: int, times: int = 1) -> None:
-    """Send virtual key event via user32."""
-    try:
-        u = ctypes.windll.user32
-        for _ in range(times):
-            u.keybd_event(key_code, 0, 0, 0)
-            u.keybd_event(key_code, 0, 2, 0)
-    except Exception:
-        pass
+# Cache for scanned applications
+_APP_CATALOG: dict[str, tuple[str, str]] = {}
+_LAST_SCAN_TIME: float = 0.0
 
 
-def find_start_menu_shortcut(name: str) -> str | None:
-    """Scan Start Menu .lnk shortcuts for a matching application name."""
-    dirs = [
+def scan_installed_applications() -> dict[str, tuple[str, str]]:
+    """Scan Start Menu, Program Files, AppData for installed apps.
+    Returns dict: clean_key -> (display_name, target_path)."""
+    global _APP_CATALOG, _LAST_SCAN_TIME
+    now = time.time()
+    if _APP_CATALOG and (now - _LAST_SCAN_TIME < 300):
+        return _APP_CATALOG
+
+    catalog: dict[str, tuple[str, str]] = {}
+
+    # 1. Start Menu Shortcuts (.lnk files)
+    start_dirs = [
         os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
         os.path.join(os.environ.get("PROGRAMDATA", ""), r"Microsoft\Windows\Start Menu\Programs"),
     ]
-    target = name.lower().strip()
-    for d in dirs:
-        if not os.path.exists(d):
+    for sd in start_dirs:
+        if not os.path.exists(sd):
             continue
-        for root, _, files in os.walk(d):
+        for root, _, files in os.walk(sd):
             for f in files:
                 if f.lower().endswith(".lnk"):
-                    stem = f[:-4].lower()
-                    if target == stem or target in stem:
-                        return os.path.join(root, f)
-    return None
+                    stem = f[:-4].strip()
+                    clean = re.sub(r"[\(\)\d\.\-_]+", " ", stem).strip().lower()
+                    catalog[clean] = (stem, os.path.join(root, f))
+                    catalog[stem.lower()] = (stem, os.path.join(root, f))
 
-
-def launch_app(name: str) -> bool:
-    """Launch an application by friendly name, executable, or protocol."""
-    target = name.lower().strip()
-
-    # Check known apps
-    if target in KNOWN_APPS:
-        spec = KNOWN_APPS[target]
-        proto = spec.get("proto")
-        if proto:
-            try:
-                os.startfile(proto)
-                return True
-            except Exception:
-                pass
-        exe = spec.get("exe")
-        if exe:
-            which_p = shutil.which(exe)
-            if which_p:
+    # 2. LocalAppData Programs
+    local_prog = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs")
+    if os.path.exists(local_prog):
+        for entry in os.listdir(local_prog):
+            full = os.path.join(local_prog, entry)
+            if os.path.isdir(full):
                 try:
-                    subprocess.Popen([which_p])
-                    return True
+                    for f in os.listdir(full):
+                        if f.lower().endswith(".exe") and not any(k in f.lower() for k in ("unins", "update", "crash")):
+                            catalog[entry.lower()] = (entry, os.path.join(full, f))
+                            catalog[f[:-4].lower()] = (f[:-4], os.path.join(full, f))
                 except Exception:
                     pass
-            # Try direct launch
+
+    # 3. WindowsApps
+    win_apps = os.path.join(os.environ.get("LOCALAPPDATA", ""), r"Microsoft\WindowsApps")
+    if os.path.exists(win_apps):
+        try:
+            for f in os.listdir(win_apps):
+                if f.lower().endswith(".exe"):
+                    stem = f[:-4]
+                    catalog[stem.lower()] = (stem, os.path.join(win_apps, f))
+        except Exception:
+            pass
+
+    # 4. Program Files & Program Files (x86)
+    program_dirs = [
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+    ]
+    for pd in program_dirs:
+        if not os.path.exists(pd):
+            continue
+        try:
+            for root, dirs, files in os.walk(pd):
+                depth = root[len(pd):].count(os.sep)
+                if depth > 3:
+                    dirs.clear()
+                    continue
+                for f in files:
+                    if f.lower().endswith(".exe"):
+                        stem = f[:-4].lower()
+                        if not any(k in stem for k in ("unins", "update", "crash", "reporter", "helper", "elevat", "install", "setup")):
+                            if stem not in catalog:
+                                catalog[stem] = (f[:-4], os.path.join(root, f))
+        except Exception:
+            pass
+
+    _APP_CATALOG = catalog
+    _LAST_SCAN_TIME = now
+    return catalog
+
+
+def resolve_app_target(query: str) -> tuple[str | None, str, bool]:
+    """Find the best matching application for user query using exact, substring and fuzzy matching.
+    Returns: (target_path_or_proto, display_name, is_fuzzy)."""
+    q = query.lower().strip()
+    q = re.sub(r"^(?:програму|додаток|приложение|app|прогу|файл)\s+", "", q).strip(' \t\r\n:"\'')
+    if not q:
+        return None, "", False
+
+    # 1. Check Known Apps exact match
+    if q in KNOWN_APPS:
+        item = KNOWN_APPS[q]
+        name = item.get("name", q.capitalize())
+        target = item.get("proto") or item.get("exe")
+        return target, name, False
+
+    # 2. Check Installed Catalog exact match
+    cat = scan_installed_applications()
+    if q in cat:
+        display, target = cat[q]
+        return target, display, False
+
+    # 3. Transliterated match
+    q_lat = transliterate(q)
+    if q_lat in KNOWN_APPS:
+        item = KNOWN_APPS[q_lat]
+        return item.get("proto") or item.get("exe"), item.get("name", q_lat.capitalize()), True
+
+    if q_lat in cat:
+        display, target = cat[q_lat]
+        return target, display, True
+
+    # 4. Substring match
+    for k, v in cat.items():
+        if len(q) >= 3 and (q == k or q in k or k in q):
+            display, target = v
+            return target, display, True
+
+    for k, item in KNOWN_APPS.items():
+        if len(q) >= 3 and (q == k or q in k or k in q):
+            name = item.get("name", k.capitalize())
+            target = item.get("proto") or item.get("exe")
+            return target, name, True
+
+    # 5. Fuzzy matching with difflib
+    best_cand = None
+    best_score = 0.0
+
+    # Match against known apps
+    for k, item in KNOWN_APPS.items():
+        s1 = difflib.SequenceMatcher(None, q, k).ratio()
+        s2 = difflib.SequenceMatcher(None, q_lat, transliterate(k)).ratio()
+        s = max(s1, s2)
+        if s > best_score:
+            best_score = s
+            name = item.get("name", k.capitalize())
+            target = item.get("proto") or item.get("exe")
+            best_cand = (target, name, True)
+
+    # Match against catalog
+    for k, v in cat.items():
+        s1 = difflib.SequenceMatcher(None, q, k).ratio()
+        s2 = difflib.SequenceMatcher(None, q_lat, k).ratio()
+        s = max(s1, s2)
+        if s > best_score:
+            best_score = s
+            display, target = v
+            best_cand = (target, display, True)
+
+    if best_score >= 0.60 and best_cand:
+        return best_cand
+
+    return None, q, False
+
+
+def launch_target(target: str, display_name: str = "") -> bool:
+    """Launch target (protocol, .lnk file, or .exe path)."""
+    if not target:
+        return False
+
+    # Protocol e.g. tg://, steam://
+    if "://" in target:
+        try:
+            os.startfile(target)
+            return True
+        except Exception:
+            pass
+
+    # Windows shortcut or executable
+    if os.path.exists(target):
+        try:
+            os.startfile(target)
+            return True
+        except Exception:
             try:
-                subprocess.Popen([exe])
-                return True
-            except Exception:
-                pass
-        fb = spec.get("fallback")
-        if fb:
-            try:
-                subprocess.Popen([fb])
+                subprocess.Popen([target])
                 return True
             except Exception:
                 pass
@@ -152,16 +302,7 @@ def launch_app(name: str) -> bool:
         except Exception:
             pass
 
-    # Check start menu shortcut
-    lnk = find_start_menu_shortcut(target)
-    if lnk:
-        try:
-            os.startfile(lnk)
-            return True
-        except Exception:
-            pass
-
-    # Fallback to start command via shell
+    # Fallback to shell start
     try:
         subprocess.Popen(f'start "" "{target}"', shell=True)
         return True
@@ -169,9 +310,20 @@ def launch_app(name: str) -> bool:
         return False
 
 
-def create_user_folder(name: str = "", location: str = "", cwd: str | None = None) -> tuple[str, str]:
-    """Create a folder on the requested or default location.
-    Returns (created_full_path, location_label)."""
+def send_media_key(key_code: int, times: int = 1) -> None:
+    """Send virtual key event via user32."""
+    try:
+        u = ctypes.windll.user32
+        for _ in range(times):
+            u.keybd_event(key_code, 0, 0, 0)
+            u.keybd_event(key_code, 0, 2, 0)
+    except Exception:
+        pass
+
+
+def create_user_folder(name: str = "", location: str = "", cwd: str | None = None) -> tuple[str, str, str]:
+    """Create a folder on requested or default location.
+    Returns (created_full_path, location_label, folder_name)."""
     loc_lower = (location or "").lower()
     if any(k in loc_lower for k in ("завантажен", "download", "загрузк")):
         base = DOWNLOADS
@@ -240,7 +392,7 @@ def handle_local_intent(text: str, cwd: str | None = None) -> tuple[bool, str | 
         path, loc_label, final_name = create_user_folder(name=name, location=loc, cwd=cwd)
         return True, f"Створив папку «{final_name}» на {loc_label}! 📁✨"
 
-    # 2. OPEN FOLDERS
+    # 2. OPEN SPECIAL FOLDERS
     if re.search(r"(?:відкрий|открой|open)\s+(?:папку\s+)?(?:робоч(?:ий|ого)\s+стіл|рабочий\s+стол|desktop|десктоп)", low):
         try:
             os.startfile(DESKTOP)
@@ -277,17 +429,19 @@ def handle_local_intent(text: str, cwd: str | None = None) -> tuple[bool, str | 
             name_cap = kw.capitalize()
             return True, f"Відкриваю {name_cap}! 🚀"
 
-    # 4. OPEN APPS
-    open_app_m = re.search(r"(?:відкрий|открой|open|запусти|запустить|launch|start)\s+(.+)", low)
+    # 4. OPEN / LAUNCH APPS (with Program Files scanning & fuzzy matching)
+    open_app_m = re.search(r"^(?:відкрий|відкрити|открой|открыть|open|запусти|запустити|запустить|launch|start)\s+(.+)", low)
     if open_app_m:
-        app_target = open_app_m.group(1).strip()
-        # Clean common words
-        app_target = re.sub(r"^(?:програму|додаток|приложение|app|прогу)\s+", "", app_target).strip()
-        for kw in KNOWN_APPS:
-            if kw == app_target or (len(kw) > 2 and kw in app_target):
-                ok = launch_app(kw)
-                if ok:
-                    return True, f"Запускаю {kw.capitalize()}! ⚡"
+        app_query = open_app_m.group(1).strip()
+        target, display_name, is_fuzzy = resolve_app_target(app_query)
+        if target:
+            launched = launch_target(target, display_name)
+            if launched:
+                if is_fuzzy:
+                    return True, f"Схоже, ти мав на увазі «{display_name}» — відкриваю! 🚀"
+                return True, f"Запускаю {display_name}! ⚡"
+        else:
+            return True, f"Не знайшов програму «{app_query}» у папках з програмами. Перевір назву чи шлях! 🤔"
 
     # 5. MEDIA CONTROLS
     if re.search(r"^(?:пауза|постав на паузу|стоп музика|пауза музика|pause)$", low) or "постав музику на паузу" in low:
@@ -359,7 +513,10 @@ def execute_action_tag(tag: str, cwd: str | None = None) -> bool:
 
         if tag.startswith("app:"):
             app_name = tag[4:].strip()
-            return launch_app(app_name)
+            target, display_name, _ = resolve_app_target(app_name)
+            if target:
+                return launch_target(target, display_name)
+            return launch_target(app_name, app_name)
 
         if tag.startswith("media:"):
             sub = tag[6:].strip().lower()
