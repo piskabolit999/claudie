@@ -527,7 +527,20 @@ while ($true) {
   if (-not (Get-Process -Id OWNER)) { exit }
   if ($n % 5 -eq 0) { $dev = @(Get-PnpDevice -PresentOnly -Status OK | ? { $_.Class -in 'AudioEndpoint','HIDClass','XnaComposite','XboxComposite' } | % { "$($_.Class)|$($_.FriendlyName)|$($_.InstanceId)" }) }
   $play = ''; $title = ''
-  if ($mgr) { $s = $mgr.GetCurrentSession(); if ($s) { $play = [string]$s.GetPlaybackInfo().PlaybackStatus; $p = Await ($s.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties]); if ($p) { $title = (@($p.Artist, $p.Title) | ? { $_ }) -join ' - ' } } }
+  if ($mgr) {
+    $s = $mgr.GetCurrentSession()
+    if (-not $s -or [string]$s.GetPlaybackInfo().PlaybackStatus -ne 'Playing') {
+      foreach ($other in $mgr.GetSessions()) {
+        if ([string]$other.GetPlaybackInfo().PlaybackStatus -eq 'Playing') { $s = $other; break }
+      }
+    }
+    if ($s) {
+      $play = [string]$s.GetPlaybackInfo().PlaybackStatus
+      $p = Await ($s.TryGetMediaPropertiesAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties])
+      if ($p) { $title = (@($p.Artist, $p.Title) | ? { $_ }) -join ' - ' }
+      if (-not $title) { $title = $s.SourceAppId }
+    }
+  }
   @{ dev = $dev; play = $play; title = $title } | ConvertTo-Json -Compress
   $n++; Start-Sleep -Seconds 3
 }

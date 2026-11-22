@@ -105,6 +105,109 @@ TIPS = [
     "Клацни по бульбашці, щоб її закрити. Esc закриває чат і меню.",
 ]
 
+SCREEN_COMMENTS = {
+    "youtube": [
+        "О, перерва на YouTube? Заслужено! 🍿",
+        "Що дивимось? Головне не зависнути на 3 години 😉",
+        "Відосики — це святе! Я теж підглядаю 👀",
+    ],
+    "video": [
+        "Ого, кіносеанс? Не забудь про попкорн! 🎬",
+    ],
+    "music": [
+        "Вайбовий трек! Гойдаюсь у такт 🎧",
+        "Під таку музику код пишеться вдвічі швидше! 🎵",
+        "Музика — кайф! Звук на максимум 🔊",
+        "Хто це грає? Мені подобається цей біт! 🎶",
+    ],
+    "code": [
+        "Бачу код! Надіюсь, без багів 😉",
+        "Ти так швидко друкуєш, я аж задивився! ⚡",
+        "Пишеш код як бог! Ну, майже як я 🦀",
+        "Не забудь зберегти файл! Ctrl+S про всяк випадок 💾",
+    ],
+    "github": [
+        "GitHub! Перевіряєш пул-реквести? 🐙",
+        "Комітимо одразу в main? Сміливо! Мені подобається 😎",
+        "Claudie зірочку на репозиторії вже поставив? ⭐",
+    ],
+    "terminal": [
+        "О, чорне віконце! Хакер у справі 💻",
+        "Головне — не писати rm -rf без бекапу! 😅",
+        "Термінал виглядає солідно. Поважаю! 👍",
+    ],
+    "search": [
+        "Гуглиш як пофіксити баг? Буває! 🔍",
+        "StackOverflow рятує щодня з 2008 року 📚",
+    ],
+    "chat": [
+        "Чатики не спиняються! Тільки не показуй мої секрети 🤫",
+    ],
+    "gaming": [
+        "О, катка пішла! Затащи цей раунд! 🎮",
+        "Я вболіваю за тебе всіма клешнями! 🏆",
+    ],
+    "idle": [
+        "Ти ще тут? Чи пішов за чаєм? ☕",
+        "Я покараулю твій екран, усе під контролем 👀",
+    ],
+    "general": [
+        "Працюємо-працюємо, результат буде вогонь! 🔥",
+        "Якщо втомилися очі — подивись у вікно на 20 секунд 👀",
+    ],
+}
+
+
+def get_foreground_info() -> tuple[str, str]:
+    try:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        if not hwnd:
+            return "", ""
+        buf = ctypes.create_unicode_buffer(512)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 512)
+        title = buf.value.strip()
+
+        pid = ctypes.c_ulong()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        pname = ""
+        hproc = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)
+        if hproc:
+            pbuf = ctypes.create_unicode_buffer(512)
+            sz = ctypes.c_ulong(512)
+            ctypes.windll.kernel32.QueryFullProcessImageNameW(hproc, 0, pbuf, ctypes.byref(sz))
+            ctypes.windll.kernel32.CloseHandle(hproc)
+            pname = os.path.basename(pbuf.value).lower()
+        return title, pname
+    except Exception:
+        return "", ""
+
+
+def classify_screen(title: str, pname: str) -> tuple[str, str]:
+    t = (title or "").lower()
+    p = (pname or "").lower()
+    if not title or title == "Program Manager" or not t.strip():
+        return ("idle", "")
+    if "youtube" in t or "youtu.be" in t:
+        clean = title.split(" - YouTube")[0].split(" - Google Chrome")[0].split(" - Microsoft​ Edge")[0].split(" - Mozilla Firefox")[0].split(" - Opera")[0].split(" - Brave")[0].strip()
+        return ("youtube", clean)
+    if any(k in t for k in ("netflix", "twitch", "vlc media player", "megogo", "kinogo", "prime video")):
+        return ("video", title)
+    if any(k in t or k in p for k in ("spotify", "soundcloud", "apple music", "deezer", "aimp", "foobar")):
+        return ("music", title)
+    if any(k in t or k in p for k in ("visual studio code", "code.exe", "pycharm", "sublime", "notepad++", "cursor.exe", "intellij", "clion")):
+        return ("code", title)
+    if "github" in t or "gitlab" in t:
+        return ("github", title)
+    if any(k in t or k in p for k in ("powershell", "cmd.exe", "terminal", "bash", "wsl", "mintty")):
+        return ("terminal", title)
+    if any(k in t for k in ("google search", "пошук google", "поиск в google", "stackoverflow", "chatgpt", "claude")):
+        return ("search", title)
+    if any(k in t or k in p for k in ("telegram", "discord", "slack", "whatsapp", "viber")):
+        return ("chat", title)
+    if any(k in t or k in p for k in ("steam", "minecraft", "dota", "cs2", "roblox", "genshin")):
+        return ("gaming", title)
+    return ("general", title)
+
 
 def log(msg: str) -> None:
     try:
@@ -262,6 +365,11 @@ class Claudik:
         self.set_theme(cfg.get("theme", "none"), save=False)
         self.devices = world.DeviceWatch(os.getpid())
         self.track_seen = ""
+        self.screen_react = cfg.get("screen_react", True)
+        self.media_active = False
+        self.next_screen_check = time.time() + 2.0
+        self.next_screen_comment_at = time.time() + random.uniform(20.0, 45.0)
+        self.last_screen_comment = ""
         self.last_redraw = 0.0
         self.drag_v = 0.0                    # horizontal drag speed, for the struggle
         self.drag_lastx = 0
@@ -320,7 +428,7 @@ class Claudik:
             with open(CONFIG, "w", encoding="utf-8") as f:
                 json.dump({"v": 2, "x": self.root.winfo_x(), "y": self.root.winfo_y(), "follow": g("follow", "auto"),
                            "lang": g("lang_pref", "auto"), "auto_lang": g("auto_lang", "uk"), "theme": g("theme", "none"),
-                           "ghost": g("ghost", False), "tip": g("tip_i", 0)}, f)
+                           "ghost": g("ghost", False), "tip": g("tip_i", 0), "screen_react": g("screen_react", True)}, f)
         except OSError:
             pass
 
@@ -400,6 +508,52 @@ class Claudik:
             self.say_t("Тепер я запускаюсь разом із Windows.", 6, "idle")
         else:
             self.say_t("Не вийшло увімкнути автозапуск.", 6, "error")
+
+    def toggle_screen_react(self) -> None:
+        self.screen_react = not self.screen_react
+        self.save_cfg()
+        if self.screen_react:
+            self.say_t("Буду підглядати й коментувати екран! 👀", 5, "idle")
+        else:
+            self.say_t("Більше не коментую екран.", 5, "idle")
+
+    def tick_screen(self) -> None:
+        now = time.time()
+        if now < self.next_screen_check:
+            return
+        self.next_screen_check = now + 2.5
+
+        title, pname = get_foreground_info()
+        cat, clean_title = classify_screen(title, pname)
+
+        # Detect active media playback from window or system
+        fg_media = cat in ("youtube", "video", "music")
+        self.media_active = fg_media or bool(self.devices.music)
+
+        # Track name from system player or foreground window
+        active_media = ""
+        if self.devices.music and self.devices.track:
+            active_media = self.devices.track
+        elif fg_media and clean_title:
+            active_media = clean_title
+
+        if active_media and active_media != self.track_seen:
+            self.track_seen = active_media
+            if self.mood == "idle" and not self.chat_open:
+                self.say(t("слухаю: ") + shorten(active_media, 50), 6, "idle")
+
+        # Screen commentary at random intervals
+        if not self.screen_react:
+            return
+        if now < self.next_screen_comment_at or self.mood != "idle" or self.chat_open or self.bubble or self.intro:
+            return
+
+        self.next_screen_comment_at = now + random.uniform(35.0, 75.0)
+        comments = SCREEN_COMMENTS.get(cat, SCREEN_COMMENTS["general"])
+        candidates = [c for c in comments if c != self.last_screen_comment] or comments
+        chosen = random.choice(candidates)
+        self.last_screen_comment = chosen
+        self.say_t(chosen, 7, "tip")
 
     def tick_tip(self) -> None:
         """Now and then, while idle, he explains one of his features."""
@@ -766,6 +920,8 @@ class Claudik:
             (t("Не заважати"), lambda: self.set_ghost(True), False, t("кліки проходять крізь мене; потрійний клік по мені повертає")),
             (t("Автозапуск з Windows"), self.toggle_autostart, os.path.exists(STARTUP_LNK),
              t("увімкнено") if os.path.exists(STARTUP_LNK) else t("вимкнено")),
+            (t("Реакції на екран"), self.toggle_screen_react, self.screen_react,
+             t("коментувати вікна та відео") if self.screen_react else t("вимкнено")),
             None,
             (t("Сховати на 15 хв"), self.snooze, False, ""), (t("Повернути в куток"), self.reset_pos, False, ""),
             (t("Очистити чат"), self.clear_chat, False, ""), None, (t("Вийти"), self.root.destroy, False, "")])
@@ -1013,14 +1169,14 @@ class Claudik:
             fr = self.frame
             if self.show:
                 self.apply_show(p)
-            elif idle_for > 300 and not self.hover and not self.devices.music:
+            elif idle_for > 300 and not self.hover and not (self.devices.music or self.media_active):
                 p.update(sq=0.35, eyes="closed", prop="sleep", dy=0, legs="sit")
             elif fr - self.greet_frame < 22 and self.theme == "sakura":
                 depth = min(1.0, (fr - self.greet_frame) / 6)
                 p.update(sq=0.45 * depth, dy=0.4 * depth, eyes="closed", prop="ojigi")
             elif fr - self.greet_frame < 22:
                 p.update(arms="wave_r", eyes="happy", prop="hi", dy=-0.5 if fr - self.greet_frame < 4 else 0)
-            elif self.devices.music:     # listening: an easy sway on the beat
+            elif self.devices.music or self.media_active:     # listening: an easy sway on the beat
                 p.update(dx=math.sin(fr / 8) * 0.35, dy=-0.3 if (fr // 4) % 2 else 0, prop="groove",
                          eyes="closed" if (fr // 32) % 2 else "happy", arms="out" if (fr // 8) % 2 else "down")
             elif self.pad_held:
@@ -1235,7 +1391,7 @@ class Claudik:
         gear = {"gadget": 0.0} if self.devices.dev["gadget"] else {}
         if self.worn_phones or (it and it["kind"] in ("phones_on", "phones_off")):
             gear["headphones"] = self.intro_lift("phones_on", "phones_off", 6.0)
-        world.draw_gear(self, gear, self.devices.music, ox, oy, top)
+        world.draw_gear(self, gear, self.devices.music or self.media_active, ox, oy, top)
         if it and it["kind"] in ("pad_on", "pad_off"):
             world.draw_pad(self, ox, oy, light=False, lift=self.intro_lift("pad_on", "pad_off", 4.0))
         elif prop == "pad":
@@ -1701,7 +1857,7 @@ class Claudik:
             if self.show_frame >= {**IDLE_SHOWS, **own}.get(self.show, 0):
                 self.show = ""
                 self.next_show_at = now + random.uniform(3, 8)
-        elif self.devices.music:
+        elif self.devices.music or self.media_active:
             return   # music on: he just grooves
         elif now >= self.next_show_at and now - self.last_activity < 300:
             pool = list(own) if own and random.random() < 0.5 else list(IDLE_SHOWS)   # half the time, the theme's own
@@ -1729,11 +1885,7 @@ class Claudik:
             self.tick_menu()
             self.tick_ghost()
             self.tick_tip()
-            dv = self.devices
-            if dv.music and dv.track and dv.track != self.track_seen:
-                self.track_seen = dv.track
-                if self.mood == "idle" and not self.chat_open:
-                    self.say(t("слухаю: ") + shorten(dv.track, 60), 6, "idle")
+            self.tick_screen()
             if self.frame % 60 == 0:
                 self.root.attributes("-topmost", True)
             self.redraw()
