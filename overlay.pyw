@@ -418,7 +418,53 @@ class Claudik:
         self.say_t("привіт! я тут, якщо що", 6, "idle")
         if cfg.get("ghost"):
             self.root.after(300, lambda: self.set_ghost(True, announce=False))
+        self.apply_overlay_styles()
         self.loop()
+
+    def apply_overlay_styles(self) -> None:
+        try:
+            u = ctypes.windll.user32
+            self.root.update_idletasks()
+            w_id = self.root.winfo_id()
+            hwnd = u.GetParent(w_id) or w_id
+
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_APPWINDOW = 0x00040000
+            WS_EX_TOPMOST = 0x00000008
+            WS_EX_LAYERED = 0x00080000
+            WS_EX_NOACTIVATE = 0x08000000
+
+            ex = u.GetWindowLongW(hwnd, -20)
+            ex = (ex | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_NOACTIVATE) & ~WS_EX_APPWINDOW
+            if getattr(self, "ghost", False):
+                ex |= 0x00000020  # WS_EX_TRANSPARENT
+            u.SetWindowLongW(hwnd, -20, ex)
+
+            # Keep topmost without stealing focus
+            u.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040)
+
+            # Windows 11 DWM: disable window corner rounding and drop shadow on transparent overlay
+            try:
+                dwm = ctypes.windll.dwmapi
+                DWMWA_WINDOW_CORNER_PREFERENCE = 33
+                DWMWCP_DONOTROUND = ctypes.c_int(1)
+                dwm.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(DWMWCP_DONOTROUND), 4)
+            except Exception:
+                pass
+        except Exception as e:
+            log(f"apply_overlay_styles: {e!r}")
+
+    def _set_noactivate(self, enable: bool) -> None:
+        try:
+            u = ctypes.windll.user32
+            hwnd = u.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+            ex = u.GetWindowLongW(hwnd, -20)
+            if enable:
+                u.SetWindowLongW(hwnd, -20, ex | 0x08000000)
+            else:
+                u.SetWindowLongW(hwnd, -20, ex & ~0x08000000)
+        except Exception:
+            pass
 
     # config
     def load_cfg(self) -> dict:
@@ -868,11 +914,13 @@ class Claudik:
             if not self.chat_msgs:
                 src = "Питай що завгодно про проект. Я бачу, що робив Claude."
                 self.chat_msgs.append({"who": "bot", "text": t(src), "src": src, "born": self.frame})
+        self._set_noactivate(False)
         self.root.after(300, self.focus_entry)
 
     def close_chat(self) -> None:
         self.chat_open = False
         self.cv.itemconfigure(self.entry_win, state="hidden")
+        self._set_noactivate(True)
         self.root.focus_set()
 
     def focus_entry(self) -> None:
@@ -1963,7 +2011,7 @@ class Claudik:
             if self.hidden_until and now >= self.hidden_until:
                 self.hidden_until = 0
                 self.root.deiconify()
-                self.root.attributes("-topmost", True)
+                self.apply_overlay_styles()
             self.read_state()
             age = now - self.mood_since
             if not self.busy_q:
@@ -1980,7 +2028,12 @@ class Claudik:
             self.tick_tip()
             self.tick_screen()
             if self.frame % 60 == 0:
-                self.root.attributes("-topmost", True)
+                try:
+                    u = ctypes.windll.user32
+                    hwnd = u.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+                    u.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040)
+                except Exception:
+                    self.root.attributes("-topmost", True)
             self.redraw()
             self.frame += 1
             self.mood_frame += 1
