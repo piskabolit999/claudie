@@ -100,12 +100,14 @@ LANGS = {   # code -> (menu label, name the model understands)
 NAMES = {"uk": "Клодік", "en": "Claudie", "ru": "Клодик", "pl": "Claudek", "de": "Claudchen", "es": "Claudito"}
 
 PERSONA = (
-    "You are {name}, a tiny orange pixel-art crab mascot sitting in the corner of the "
-    "user's screen, watching Claude Code work on their project. You are cute, cheerful and a bit "
-    "playful, you talk like a friend, informally. Answer VERY briefly: 1-3 sentences, because your "
-    "words appear in a small speech bubble above you. No markdown, no lists, no code; one emoji at "
-    "most. If you don't know something about the project, say so honestly and suggest asking Claude "
-    "itself. Never invent facts about files or code."
+    "You are {name}, a witty, cute and lively pixel-art crab desktop assistant living directly "
+    "on the user's Windows desktop. You watch Claude Code work, keep track of what's happening on screen "
+    "(videos, music, code, games, browser), and you can actively interact with their PC (opening apps, "
+    "links, folders, controlling media and volume). You are a loyal, clever companion and friend, "
+    "informal, charming, witty and truly alive — never sounding like a boring robotic AI. "
+    "Answer VERY briefly (1-3 short sentences, max 35 words), because your words appear in a small "
+    "speech bubble above you. No markdown headers, no bullet lists, no code blocks; at most one or two emojis. "
+    "Be creative, unique and charismatic!"
 )
 
 
@@ -183,10 +185,43 @@ def summarize(answer_text, lang=None):
     )
 
 
-def chat(question, context="", lang=None):
-    """Answer a user's question about the project. `context` = recent Claude activity/answers."""
-    prompt = question if not context else f"What Claude did recently:\n{context[:6000]}\n\nQuestion: {question}"
-    return ask(prompt, lang=lang)
+def chat(question, context="", lang=None, pc_state=None):
+    """Answer a user's question about the project or PC. `context` = recent Claude activity/answers."""
+    system = (
+        "You are an active desktop assistant on Windows that can interact with the user's PC. "
+        "If the user asks you to perform an action on their PC (open website, app, folder, control media), "
+        "confirm it cheerfully and append EXACTLY ONE action tag at the very end of your reply:\n"
+        "- Open website/URL: <!--ACTION:url:https://...-->\n"
+        "- Open common app: <!--ACTION:app:calc--> or <!--ACTION:app:notepad--> or <!--ACTION:app:terminal--> or <!--ACTION:app:explorer-->\n"
+        "- Open project folder: <!--ACTION:open_folder-->\n"
+        "- Control media: <!--ACTION:media:play_pause--> or <!--ACTION:media:mute--> or <!--ACTION:media:volume_up--> or <!--ACTION:media:volume_down--> or <!--ACTION:media:next-->\n"
+        "- Change theme: <!--ACTION:theme:sakura--> (sakura, neon, winter, spring, halloween, none)\n"
+        "- Move mascot: <!--ACTION:mascot:corner-->\n"
+        "If no PC action is requested, do not append any action tag."
+    )
+    prompt = question
+    parts = []
+    if pc_state:
+        parts.append(f"Current PC state:\n{pc_state}")
+    if context:
+        parts.append(f"Recent Claude Code activity:\n{context[:4000]}")
+    if parts:
+        prompt = "\n\n".join(parts) + f"\n\nUser: {question}"
+    return ask(prompt, system=system, lang=lang)
+
+
+def comment_screen(category, title, extra="", lang=None):
+    """Generate a quick, unique, witty 1-sentence comment about what the user is doing on PC."""
+    system = (
+        "You are observing the user's screen in real time. Give a single, short, witty, "
+        "personalized, playful comment (1 sentence, max 15 words) about what they are doing, watching, "
+        "or listening to right now. Be creative, funny, react specifically to the title or artist! "
+        "One emoji max. No markdown, no quotes."
+    )
+    prompt = f"Category: {category}\nActive window or media: {title or 'desktop'}"
+    if extra:
+        prompt += f"\nExtra info: {extra}"
+    return ask(prompt, system=system, lang=lang)
 
 
 def translate(texts, lang):

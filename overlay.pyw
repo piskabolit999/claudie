@@ -21,6 +21,7 @@ import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
+import webbrowser
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -370,6 +371,11 @@ class Claudik:
         self.next_screen_check = time.time() + 2.0
         self.next_screen_comment_at = time.time() + random.uniform(20.0, 45.0)
         self.last_screen_comment = ""
+        self.active_win_title = ""
+        self.active_pname = ""
+        self.active_cat = "idle"
+        self.active_media = ""
+        self.commenting_ai = False
         self.last_redraw = 0.0
         self.drag_v = 0.0                    # horizontal drag speed, for the struggle
         self.drag_lastx = 0
@@ -525,6 +531,9 @@ class Claudik:
 
         title, pname = get_foreground_info()
         cat, clean_title = classify_screen(title, pname)
+        self.active_win_title = title
+        self.active_pname = pname
+        self.active_cat = cat
 
         # Detect active media playback from window or system
         fg_media = cat in ("youtube", "video", "music")
@@ -536,6 +545,7 @@ class Claudik:
             active_media = self.devices.track
         elif fg_media and clean_title:
             active_media = clean_title
+        self.active_media = active_media
 
         if active_media and active_media != self.track_seen:
             self.track_seen = active_media
@@ -545,15 +555,88 @@ class Claudik:
         # Screen commentary at random intervals
         if not self.screen_react:
             return
-        if now < self.next_screen_comment_at or self.mood != "idle" or self.chat_open or self.bubble or self.intro:
+        if now < self.next_screen_comment_at or self.mood != "idle" or self.chat_open or self.bubble or self.intro or self.commenting_ai:
             return
 
         self.next_screen_comment_at = now + random.uniform(35.0, 75.0)
-        comments = SCREEN_COMMENTS.get(cat, SCREEN_COMMENTS["general"])
-        candidates = [c for c in comments if c != self.last_screen_comment] or comments
-        chosen = random.choice(candidates)
-        self.last_screen_comment = chosen
-        self.say_t(chosen, 7, "tip")
+        self.commenting_ai = True
+        comment_item = active_media or clean_title or title
+        threading.Thread(target=self._ai_comment_worker, args=(cat, comment_item), daemon=True).start()
+
+    def _ai_comment_worker(self, cat: str, item: str) -> None:
+        comment = None
+        lang = self.lang()
+        try:
+            comment = freeai.comment_screen(cat, item, lang=lang)
+        except Exception as e:
+            log(f"comment_screen: {e!r}")
+
+        def apply_comment() -> None:
+            self.commenting_ai = False
+            if self.chat_open or self.mood != "idle" or self.bubble:
+                return
+            if comment and len(comment.strip()) > 3:
+                self.last_screen_comment = comment.strip()
+                self.say(comment.strip(), 7, "tip")
+            else:
+                comments = SCREEN_COMMENTS.get(cat, SCREEN_COMMENTS["general"])
+                candidates = [c for c in comments if c != self.last_screen_comment] or comments
+                chosen = random.choice(candidates)
+                self.last_screen_comment = chosen
+                self.say_t(chosen, 7, "tip")
+
+        self.root.after(0, apply_comment)
+
+    def execute_pc_action(self, tag: str) -> None:
+        """Execute a PC action requested by the user / decided by the AI."""
+        tag = (tag or "").strip()
+        if not tag:
+            return
+        log(f"execute_pc_action: {tag}")
+        try:
+            if tag.startswith("url:"):
+                url = tag[4:].strip()
+                if not url.startswith(("http://", "https://")):
+                    url = "https://" + url
+                webbrowser.open(url)
+            elif tag in ("open_folder", "app:explorer"):
+                folder = self.cwd if (self.cwd and os.path.exists(self.cwd)) else os.path.expanduser("~")
+                os.startfile(folder)
+            elif tag.startswith("app:"):
+                app = tag[4:].strip().lower()
+                if app == "calc":
+                    subprocess.Popen(["calc.exe"])
+                elif app == "notepad":
+                    subprocess.Popen(["notepad.exe"])
+                elif app == "terminal":
+                    subprocess.Popen(["powershell.exe"])
+            elif tag.startswith("media:"):
+                sub = tag[6:].strip().lower()
+                user32 = ctypes.windll.user32
+                vk_map = {
+                    "play_pause": 0xB3,
+                    "mute": 0xAD,
+                    "volume_up": 0xAF,
+                    "volume_down": 0xAE,
+                    "next": 0xB0,
+                    "prev": 0xB1,
+                }
+                vk = vk_map.get(sub)
+                if vk:
+                    times = 4 if sub in ("volume_up", "volume_down") else 1
+                    for _ in range(times):
+                        user32.keybd_event(vk, 0, 0, 0)
+                        user32.keybd_event(vk, 0, 2, 0)
+            elif tag.startswith("theme:"):
+                th = tag[6:].strip().lower()
+                if th in world.THEMES:
+                    self.set_theme(th)
+            elif tag == "mascot:corner":
+                self.reset_pos()
+            elif tag == "mascot:snooze":
+                self.snooze()
+        except Exception as e:
+            log(f"execute_pc_action error: {e!r}")
 
     def tick_tip(self) -> None:
         """Now and then, while idle, he explains one of his features."""
@@ -812,8 +895,16 @@ class Claudik:
         lang = self.lang()
         context = (f"Chat: {self.title}\nProject folder: {self.cwd}\n"
                    + "\n\n---\n".join(self.recent.get(self.sid, [])))
+        pc_state = (f"Active window: {self.active_win_title or 'Desktop'} ({self.active_cat})\n"
+                    f"Media / Music: {self.active_media or 'None'}")
+        action_found = None
         try:
-            out = freeai.chat(q, context, lang)
+            out = freeai.chat(q, context, lang, pc_state=pc_state)
+            if out:
+                m = re.search(r"<!--ACTION:(.*?)-->", out)
+                if m:
+                    action_found = m.group(1).strip()
+                    out = re.sub(r"<!--ACTION:.*?-->", "", out).strip()
         except Exception as e:  # noqa: BLE001
             log(f"chat: {e!r}")
             out = None
@@ -830,6 +921,8 @@ class Claudik:
             self.variant = "flag" if out else "shake"
             if not self.chat_open:
                 self.say(shorten(text, 200), 30, "answer")
+            if action_found:
+                self.execute_pc_action(action_found)
         self.root.after(0, done)
 
     # mouse
