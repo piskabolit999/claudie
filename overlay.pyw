@@ -29,6 +29,7 @@ import freeai  # noqa: E402  free LLM backend (Groq / Gemini / Pollinations)
 import l10n  # noqa: E402  interface strings in the chosen language
 from l10n import t  # noqa: E402
 import world  # noqa: E402  themes, weather, devices and music
+import pc_actions  # noqa: E402  local PC actions and intent recognition
 l10n.set_translator(freeai.translate)   # any interface string without a translation gets one by itself
 
 SESSIONS = os.path.join(HERE, "sessions")   # one state file per chat, written by hook.py
@@ -640,40 +641,7 @@ class Claudik:
             return
         log(f"execute_pc_action: {tag}")
         try:
-            if tag.startswith("url:"):
-                url = tag[4:].strip()
-                if not url.startswith(("http://", "https://")):
-                    url = "https://" + url
-                webbrowser.open(url)
-            elif tag in ("open_folder", "app:explorer"):
-                folder = self.cwd if (self.cwd and os.path.exists(self.cwd)) else os.path.expanduser("~")
-                os.startfile(folder)
-            elif tag.startswith("app:"):
-                app = tag[4:].strip().lower()
-                if app == "calc":
-                    subprocess.Popen(["calc.exe"])
-                elif app == "notepad":
-                    subprocess.Popen(["notepad.exe"])
-                elif app == "terminal":
-                    subprocess.Popen(["powershell.exe"])
-            elif tag.startswith("media:"):
-                sub = tag[6:].strip().lower()
-                user32 = ctypes.windll.user32
-                vk_map = {
-                    "play_pause": 0xB3,
-                    "mute": 0xAD,
-                    "volume_up": 0xAF,
-                    "volume_down": 0xAE,
-                    "next": 0xB0,
-                    "prev": 0xB1,
-                }
-                vk = vk_map.get(sub)
-                if vk:
-                    times = 4 if sub in ("volume_up", "volume_down") else 1
-                    for _ in range(times):
-                        user32.keybd_event(vk, 0, 0, 0)
-                        user32.keybd_event(vk, 0, 2, 0)
-            elif tag.startswith("theme:"):
+            if tag.startswith("theme:"):
                 th = tag[6:].strip().lower()
                 if th in world.THEMES:
                     self.set_theme(th)
@@ -681,6 +649,8 @@ class Claudik:
                 self.reset_pos()
             elif tag == "mascot:snooze":
                 self.snooze()
+            else:
+                pc_actions.execute_action_tag(tag, cwd=self.cwd)
         except Exception as e:
             log(f"execute_pc_action error: {e!r}")
 
@@ -946,16 +916,28 @@ class Claudik:
         pc_state = (f"Active window: {self.active_win_title or 'Desktop'} ({self.active_cat})\n"
                     f"Media / Music: {self.active_media or 'None'}")
         action_found = None
+        out = None
+
+        # Tier 1: Check direct local intent first (instant, 100% reliable)
         try:
-            out = freeai.chat(q, context, lang, pc_state=pc_state)
-            if out:
-                m = re.search(r"<!--ACTION:(.*?)-->", out)
-                if m:
-                    action_found = m.group(1).strip()
-                    out = re.sub(r"<!--ACTION:.*?-->", "", out).strip()
-        except Exception as e:  # noqa: BLE001
-            log(f"chat: {e!r}")
-            out = None
+            handled, local_reply = pc_actions.handle_local_intent(q, cwd=self.cwd)
+            if handled and local_reply:
+                out = local_reply
+        except Exception as e:
+            log(f"local_intent error: {e!r}")
+
+        # Tier 2: FreeAI / LLM query if not a direct local action
+        if not out:
+            try:
+                out = freeai.chat(q, context, lang, pc_state=pc_state)
+                if out:
+                    m = re.search(r"<!--ACTION:(.*?)-->", out)
+                    if m:
+                        action_found = m.group(1).strip()
+                        out = re.sub(r"<!--ACTION:.*?-->", "", out).strip()
+            except Exception as e:  # noqa: BLE001
+                log(f"chat: {e!r}")
+                out = None
 
         def done() -> None:
             self.busy_q = False
