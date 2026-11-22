@@ -135,8 +135,10 @@ def make_shortcut(path: str) -> None:
     q = lambda s: "'" + s.replace("'", "''") + "'"   # PowerShell single-quoted literal
     pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     script = os.path.join(HERE, "overlay.pyw")
+    icon = os.path.join(HERE, "icon.ico")
+    icon_ps = f";$s.IconLocation={q(icon + ',0')}" if os.path.exists(icon) else ""
     ps = (f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut({q(path)});$s.TargetPath={q(pythonw)};"
-          f"$s.Arguments={q(chr(34) + script + chr(34))};$s.WorkingDirectory={q(HERE)};$s.Save()")
+          f"$s.Arguments={q(chr(34) + script + chr(34))};$s.WorkingDirectory={q(HERE)}{icon_ps};$s.Save()")
     subprocess.run(["powershell", "-NoProfile", "-Command", ps], creationflags=0x08000000, timeout=20)
 
 
@@ -183,6 +185,12 @@ class Claudik:
             pass
         self.root = tk.Tk()
         self.root.title("Клодік")
+        icon_path = os.path.join(HERE, "icon.ico")
+        if os.path.exists(icon_path):
+            try:
+                self.root.iconbitmap(icon_path)
+            except Exception:
+                pass
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
         self.root.configure(bg=KEY)
@@ -205,8 +213,8 @@ class Claudik:
             cfg["x"] += 340 - W
             cfg["y"] += 330 - H
         x, y = cfg.get("x", r - W - 6), cfg.get("y", b - H + 4)
-        x = min(max(l - W + 120, x), r - 120)
-        y = min(max(t - H + 140, y), b - H + 40)
+        x = min(max(l - W + 120, x), r - W - 6)
+        y = min(max(t - H + 140, y), b - H + 4)
         self.root.geometry(f"{W}x{H}+{x}+{y}")
         if migrate:
             self.root.update_idletasks()
@@ -1751,9 +1759,13 @@ def main() -> None:
     try:
         lock.bind(("127.0.0.1", 47613))  # single instance
     except OSError:
+        log("single instance lock busy")
         return
-    app = Claudik()
-    app.root.mainloop()
+    try:
+        app = Claudik()
+        app.root.mainloop()
+    except Exception as e:
+        log(f"fatal crash: {e!r}")
 
 
 if __name__ == "__main__":
